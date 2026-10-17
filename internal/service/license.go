@@ -523,10 +523,7 @@ func (s *LicenseService) assertUsable(lic *model.License) error {
 }
 
 func (s *LicenseService) maxActivations(lic *model.License) int {
-	if lic.Plan != nil {
-		return lic.Plan.MaxActivations
-	}
-	return 3
+	return lic.EffectiveLimits().Activations.Value
 }
 
 func (s *LicenseService) graceDays(lic *model.License) int {

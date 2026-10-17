@@ -177,10 +177,10 @@ func (h *PortalActivationsHandler) Delete(c *gin.Context) {
 // (driven by the plan's max_activations). Used for UI hints like
 // "2 / 3 devices in use".
 func maxActivationsForLicense(lic *model.License) int {
-	if lic.Plan != nil && lic.Plan.MaxActivations > 0 {
-		return lic.Plan.MaxActivations
+	if lic.Plan == nil {
+		return 0
 	}
-	return 0
+	return lic.EffectiveLimits().Activations.Value
 }
 
 func emailFromContext(c *gin.Context) string {

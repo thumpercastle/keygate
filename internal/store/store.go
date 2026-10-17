@@ -510,6 +510,9 @@ func (s *Store) prepareLicenseForInsert(l *model.License) error {
 	if l.ID == "" {
 		l.ID = newID()
 	}
+	if l.Quantity == 0 {
+		l.Quantity = 1
+	}
 	l.KeyHash = license.HashKey(l.LicenseKey)
 	if s.LicenseKeyAEAD != nil && l.LicenseKey != "" {
 		ct, err := s.LicenseKeyAEAD.Encrypt([]byte(l.LicenseKey), []byte(l.ID))
@@ -769,6 +772,69 @@ var ErrStaleSubscriptionRead = errors.New("a newer read of this subscription is 
 // state.
 func (s *Store) UpdateLicenseFromSubscriptionRead(ctx context.Context, lic *model.License, asOf time.Time, cols ...string) error {
 	return s.updateLicenseAndSubscription(ctx, lic, true, &asOf, cols...)
+}
+
+// UpdateLicenseFromSubscriptionWithPreviousQuantity is the guarded
+// subscription write used when the caller may need to announce a quantity
+// change. The old value is read under the same row lock and transaction as
+// the linked, restricted, and read-stamp guarded update.
+func (s *Store) UpdateLicenseFromSubscriptionWithPreviousQuantity(ctx context.Context, lic *model.License, asOf *time.Time, cols ...string) (int, error) {
+	var previous int
+	err := RunInTx(ctx, s.DB, func(ctx context.Context, tx bun.Tx) error {
+		if err := tx.NewRaw("SELECT quantity FROM licenses WHERE id = ? FOR UPDATE", lic.ID).Scan(ctx, &previous); err != nil {
+			return err
+		}
+		return updateLicenseAndSubscriptionIn(ctx, tx, lic, true, asOf, cols...)
+	})
+	return previous, err
+}
+
+// UpdateLicensePlanAndQuantity records a plan Stripe has already accepted.
+// The plan is always persisted so a concurrent subscription read cannot leave
+// Keygate displaying the old billed plan. Quantity remains guarded by the
+// current link, state, and read stamp; a newer Stripe read is authoritative.
+// It returns the quantity held before this transition and whether quantity
+// was eligible to be written.
+func (s *Store) UpdateLicensePlanAndQuantity(ctx context.Context, lic *model.License, asOf time.Time, updateQuantity bool) (int, bool, error) {
+	var previous struct {
+		Quantity             int        `bun:"quantity"`
+		Status               string     `bun:"status"`
+		StripeSubscriptionID string     `bun:"stripe_subscription_id"`
+		StripeSyncedAt       *time.Time `bun:"stripe_synced_at"`
+	}
+	quantityWritten := false
+	err := RunInTx(ctx, s.DB, func(ctx context.Context, tx bun.Tx) error {
+		if err := tx.NewRaw("SELECT quantity, status, COALESCE(stripe_subscription_id, '') AS stripe_subscription_id, stripe_synced_at FROM licenses WHERE id = ? FOR UPDATE", lic.ID).Scan(ctx, &previous); err != nil {
+			return err
+		}
+		if _, err := tx.NewRaw("UPDATE licenses SET plan_id = ?, updated_at = now() WHERE id = ?", lic.PlanID, lic.ID).Exec(ctx); err != nil {
+			return err
+		}
+		if previous.StripeSubscriptionID == lic.StripeSubscriptionID && previous.StripeSubscriptionID != "" {
+			if _, err := tx.NewRaw(`UPDATE subscriptions SET plan_id = ?, updated_at = now()
+				WHERE id = (SELECT id FROM subscriptions WHERE license_id = ? ORDER BY created_at DESC LIMIT 1)`, lic.PlanID, lic.ID).Exec(ctx); err != nil {
+				return err
+			}
+		}
+		if !updateQuantity || previous.StripeSubscriptionID == "" || previous.StripeSubscriptionID != lic.StripeSubscriptionID {
+			lic.Quantity = previous.Quantity
+			return nil
+		}
+		if previous.Status != model.StatusActive && previous.Status != model.StatusTrialing && previous.Status != model.StatusPastDue {
+			lic.Quantity = previous.Quantity
+			return nil
+		}
+		if previous.StripeSyncedAt != nil && previous.StripeSyncedAt.After(asOf) {
+			lic.Quantity = previous.Quantity
+			return nil
+		}
+		if _, err := tx.NewRaw("UPDATE licenses SET quantity = ?, stripe_synced_at = ?, updated_at = now() WHERE id = ?", lic.Quantity, asOf, lic.ID).Exec(ctx); err != nil {
+			return err
+		}
+		quantityWritten = true
+		return nil
+	})
+	return previous.Quantity, quantityWritten, err
 }
 
 // UpdateLicenseFromSubscriptionEnded is the write for a subscription that

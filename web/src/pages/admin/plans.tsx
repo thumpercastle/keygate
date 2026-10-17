@@ -184,7 +184,14 @@ export default function PlansPage() {
                         </DataTableCell>
                         <DataTableCell>
                           {supportsActivations ? (
-                            p.max_activations
+                            <span>
+                              {p.max_activations}
+                              {p.per_seat && (
+                                <Badge variant="outline" className="ml-2">
+                                  {t("plans.perSeat")}
+                                </Badge>
+                              )}
+                            </span>
                           ) : (
                             <span className="text-muted-foreground" title={t("plans.notApplicableForType")}>
                               —
@@ -193,7 +200,14 @@ export default function PlansPage() {
                         </DataTableCell>
                         <DataTableCell>
                           {supportsSeats ? (
-                            p.max_seats || 0
+                            <span>
+                              {p.max_seats || 0}
+                              {p.per_seat && (
+                                <Badge variant="outline" className="ml-2">
+                                  {t("plans.perSeat")}
+                                </Badge>
+                              )}
+                            </span>
                           ) : (
                             <span className="text-muted-foreground" title={t("plans.notApplicableForType")}>
                               —
@@ -332,6 +346,9 @@ function PlanDialog({
     billing_interval: plan ? (plan.license_type === "perpetual" ? "" : (plan.billing_interval ?? "")) : "month",
     max_activations: plan?.max_activations ?? 3,
     max_seats: plan?.max_seats ?? 1,
+    per_seat: plan?.per_seat ?? false,
+    min_quantity: plan?.min_quantity ?? 1,
+    max_quantity: plan?.max_quantity ?? 1,
     trial_days: plan?.trial_days ?? 0,
     grace_days: plan?.grace_days ?? 7,
     license_model: plan?.license_model || "standard",
@@ -351,7 +368,12 @@ function PlanDialog({
   // the form doesn't show a period the plan will never bill on.
   const isPerpetual = form.license_type === "perpetual"
   const setLicenseType = (v: string) => {
-    setForm((f) => ({ ...f, license_type: v, billing_interval: v === "perpetual" ? "" : f.billing_interval }))
+    setForm((f) => ({
+      ...f,
+      license_type: v,
+      billing_interval: v === "perpetual" ? "" : f.billing_interval,
+      per_seat: v === "subscription" && f.per_seat,
+    }))
   }
 
   // Capability map keyed by the currently-selected product's type.
@@ -475,6 +497,46 @@ function PlanDialog({
                     <SelectItem value="year">{t("plans.yearly")}</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <div className="space-y-2 sm:col-span-2">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={form.per_seat}
+                    disabled={form.license_type !== "subscription"}
+                    onChange={(e) => set("per_seat", e.target.checked)}
+                    className="h-4 w-4 rounded border-input accent-primary"
+                    id="plan-per-seat"
+                  />
+                  <Label htmlFor="plan-per-seat">{t("plans.soldPerSeat")}</Label>
+                </div>
+                {form.per_seat && (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <Label>{t("plans.minQuantity")}</Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={10000}
+                          value={form.min_quantity}
+                          onChange={(e) => set("min_quantity", Number(e.target.value))}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>{t("plans.maxQuantity")}</Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={10000}
+                          value={form.max_quantity}
+                          onChange={(e) => set("max_quantity", Number(e.target.value))}
+                        />
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{t("plans.perSeatHint")}</p>
+                  </>
+                )}
               </div>
               {supports.activations && (
                 <div className="space-y-2">

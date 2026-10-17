@@ -169,6 +169,12 @@ func (s *Store) FillPlanIDs(p *model.Plan) {
 	if p.CheckoutID == "" {
 		p.CheckoutID = shortID()
 	}
+	if p.MinQuantity == 0 {
+		p.MinQuantity = 1
+	}
+	if p.MaxQuantity == 0 {
+		p.MaxQuantity = 1
+	}
 }
 
 func (s *Store) CreatePlan(ctx context.Context, p *model.Plan) error {

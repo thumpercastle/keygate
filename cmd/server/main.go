@@ -55,6 +55,39 @@ var credentialQueryParams = []string{"license_key", "license_token"}
 // slash; the segment that follows it is the secret.
 var credentialPathPrefixes = []string{"/api/v1/portal/licenses/"}
 
+type portalLicense struct {
+	*model.License
+	LicenseKey string `json:"license_key"`
+}
+
+func portalPlanView(p *model.Plan) gin.H {
+	return gin.H{
+		"id": p.ID, "name": p.Name, "slug": p.Slug,
+		"license_type": p.LicenseType, "billing_interval": p.BillingInterval,
+		"per_seat": p.PerSeat, "min_quantity": p.MinQuantity, "max_quantity": p.MaxQuantity,
+		"stripe_price_id": p.StripePriceID, "checkout_id": p.CheckoutID,
+	}
+}
+
+func (out portalLicense) MarshalJSON() ([]byte, error) {
+	fields := map[string]json.RawMessage{}
+	if out.License != nil {
+		body, err := json.Marshal(out.License)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(body, &fields); err != nil {
+			return nil, err
+		}
+	}
+	key, err := json.Marshal(out.LicenseKey)
+	if err != nil {
+		return nil, err
+	}
+	fields["license_key"] = key
+	return json.Marshal(fields)
+}
+
 // credentialPathSuffixes name the first segment of each continuation
 // that may follow the secret and be kept in a log line. Keeping the
 // continuation is what makes an access log worth reading: it says
@@ -870,10 +903,6 @@ func main() {
 			// credential and the portal genuinely needs it — it is
 			// both displayed and used to address the activation and
 			// seat endpoints — so re-attach it explicitly.
-			type portalLicense struct {
-				*model.License
-				LicenseKey string `json:"license_key"`
-			}
 			out := make([]portalLicense, 0, len(licenses))
 			for _, l := range licenses {
 				out = append(out, portalLicense{License: l, LicenseKey: db.DecryptLicenseKey(l)})
@@ -944,11 +973,7 @@ func main() {
 			var active []gin.H
 			for _, p := range plans {
 				if p.Active {
-					active = append(active, gin.H{
-						"id": p.ID, "name": p.Name, "slug": p.Slug,
-						"license_type": p.LicenseType, "billing_interval": p.BillingInterval,
-						"stripe_price_id": p.StripePriceID, "checkout_id": p.CheckoutID,
-					})
+					active = append(active, portalPlanView(p))
 				}
 			}
 			response.OK(c, gin.H{"plans": response.Array(active)})
@@ -1172,6 +1197,7 @@ func main() {
 		licWrite.POST("/licenses/:id/suspend", adminH.SuspendLicense)
 		licWrite.POST("/licenses/:id/reinstate", adminH.ReinstateLicense)
 		licWrite.POST("/licenses/:id/valid-until", adminH.SetLicenseValidUntil)
+		licWrite.POST("/licenses/:id/quantity", adminH.SetLicenseQuantity)
 		licWrite.POST("/licenses/:id/updates-until", adminH.SetLicenseUpdatesUntil)
 		licWrite.POST("/licenses/:id/change-plan", adminH.ChangeLicensePlan)
 		// Cuts a licence loose from a subscription Stripe has

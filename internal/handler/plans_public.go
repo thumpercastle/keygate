@@ -129,6 +129,7 @@ func (h *PublicPlansHandler) ListPlans(c *gin.Context) {
 		out := gin.H{
 			"id": p.ID, "name": p.Name, "slug": p.Slug,
 			"license_type": p.LicenseType, "billing_interval": p.BillingInterval,
+			"per_seat": p.PerSeat, "min_quantity": p.MinQuantity, "max_quantity": p.MaxQuantity,
 			"checkout_id": p.CheckoutID,
 			"price":       nil,
 			"currency":    nil,

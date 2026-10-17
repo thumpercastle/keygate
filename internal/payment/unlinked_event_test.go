@@ -3,6 +3,7 @@ package payment
 import (
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestUnlinkedSubscriptionEventIsNotApplied(t *testing.T) {
 	canceled := time.Now()
 	inFlight.Status = model.StatusCanceled
 	inFlight.CanceledAt = &canceled
-	if h.applyLicenseFromSubscription(ctx, inFlight, "customer.subscription.deleted", nil, "status", "canceled_at") {
+	if _, applied := h.applyLicenseFromSubscription(ctx, inFlight, "customer.subscription.deleted", nil, "status", "canceled_at"); applied {
 		t.Fatal("stale event reported as applied; the caller would then audit and dispatch a cancellation that never happened")
 	}
 
@@ -82,7 +83,7 @@ func TestUnlinkedSubscriptionEventIsNotApplied(t *testing.T) {
 		t.Fatalf("find second: %v", err)
 	}
 	live.Status = model.StatusCanceled
-	if !h.applyLicenseFromSubscription(ctx, live, "customer.subscription.deleted", nil, "status") {
+	if _, applied := h.applyLicenseFromSubscription(ctx, live, "customer.subscription.deleted", nil, "status"); !applied {
 		t.Fatal("a licence still on its subscription was not written")
 	}
 	if reloaded, err := s.FindLicenseByID(ctx, lic2.ID); err != nil || reloaded.Status != model.StatusCanceled {
@@ -104,8 +105,9 @@ func TestEveryCallerChecksTheApplyResult(t *testing.T) {
 		t.Fatal("no call sites found — did the helper get renamed?")
 	}
 	for _, c := range calls {
-		if prefix := c[2]; prefix != "if !" {
-			t.Errorf("call site ignores the result (prefix %q); it must read `if !h.applyLicenseFromSubscription(...) { return }`", prefix)
+		prefix := strings.TrimSpace(c[2])
+		if prefix != "if !" && prefix != "if _, applied :=" && prefix != "persistedOldQuantity, applied :=" {
+			t.Errorf("call site ignores the result (prefix %q); check the applied bool before side effects", prefix)
 		}
 	}
 	if len(calls) < 6 {

@@ -214,11 +214,18 @@ func mergeTermsIn(ctx context.Context, tx bun.Tx, p *model.Plan, terms planTerms
 	return locked, changed, nil
 }
 
-func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed, typeChanged bool, terms planTermsRequest, cols []string) error {
+type perSeatToggleConflict struct{ count int }
+
+func (e *perSeatToggleConflict) Error() string {
+	return "cannot change per-seat mode while a plan has licenses"
+}
+
+func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed, typeChanged bool, perSeat *bool, terms planTermsRequest, cols []string) error {
 	if len(cols) == 0 {
 		return nil
 	}
-	if !needsGatedFeed && !typeChanged && !terms.carried() {
+	perSeatChanged := perSeat != nil
+	if !needsGatedFeed && !typeChanged && !terms.carried() && !perSeatChanged {
 		return h.Store.UpdatePlan(c, p, cols...)
 	}
 	return h.Store.RunInTx(c, func(ctx context.Context, tx bun.Tx) error {
@@ -239,10 +246,26 @@ func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed,
 		// is there now, not over the snapshot it started from.
 		var locked *model.Plan
 		termsMoved := false
-		if terms.carried() {
+		if terms.carried() || perSeatChanged {
 			var err error
-			if locked, termsMoved, err = mergeTermsIn(ctx, tx, p, terms); err != nil {
+			if terms.carried() {
+				if locked, termsMoved, err = mergeTermsIn(ctx, tx, p, terms); err != nil {
+					return err
+				}
+			} else {
+				locked, err = store.FindPlanByIDIn(ctx, tx, p.ID)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if perSeat != nil && locked != nil && *perSeat != locked.PerSeat {
+			n, err := store.PlanLicenseCountIn(ctx, tx, p.ID)
+			if err != nil {
 				return err
+			}
+			if n > 0 {
+				return &perSeatToggleConflict{count: n}
 			}
 		}
 		// Whether this is a type change is decided against the plan
@@ -898,6 +921,9 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		BillingInterval string `json:"billing_interval"`
 		MaxActivations  int    `json:"max_activations"`
 		MaxSeats        int    `json:"max_seats"`
+		PerSeat         bool   `json:"per_seat"`
+		MinQuantity     *int   `json:"min_quantity"`
+		MaxQuantity     *int   `json:"max_quantity"`
 		TrialDays       int    `json:"trial_days"`
 		// Pointers so "omitted" (use the default) and an explicit 0
 		// ("no grace", "no timeout") stay distinguishable. Before, a
@@ -916,6 +942,11 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		response.BadRequest(c, "product_id, name, slug, and license_type are required")
 		return
 	}
+	minQuantity, maxQuantity, err := normalizeQuantityBounds(req.MinQuantity, req.MaxQuantity)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	if err := apperr.ValidateName("name", req.Name); err != nil {
 		response.BadRequest(c, err.Message)
@@ -930,6 +961,10 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 	case "subscription", "perpetual", "trial":
 	default:
 		response.BadRequest(c, "license_type must be subscription, perpetual, or trial")
+		return
+	}
+	if req.PerSeat && req.LicenseType != "subscription" {
+		response.BadRequest(c, "per_seat is only supported for subscription plans")
 		return
 	}
 	billingInterval, err := normalizeBillingInterval(req.LicenseType, req.BillingInterval)
@@ -1039,6 +1074,9 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		BillingInterval:      billingInterval,
 		MaxActivations:       req.MaxActivations,
 		MaxSeats:             req.MaxSeats,
+		PerSeat:              req.PerSeat,
+		MinQuantity:          minQuantity,
+		MaxQuantity:          maxQuantity,
 		TrialDays:            req.TrialDays,
 		GraceDays:            graceDays,
 		StripePriceID:        req.StripePriceID,
@@ -1089,6 +1127,9 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		BillingInterval      *string `json:"billing_interval"`
 		MaxActivations       *int    `json:"max_activations"`
 		MaxSeats             *int    `json:"max_seats"`
+		PerSeat              *bool   `json:"per_seat"`
+		MinQuantity          *int    `json:"min_quantity"`
+		MaxQuantity          *int    `json:"max_quantity"`
 		TrialDays            *int    `json:"trial_days"`
 		GraceDays            *int    `json:"grace_days"`
 		StripePriceID        *string `json:"stripe_price_id"`
@@ -1103,6 +1144,41 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request body")
+		return
+	}
+	perSeat := p.PerSeat
+	if req.PerSeat != nil {
+		perSeat = *req.PerSeat
+	}
+	minInput, maxInput := req.MinQuantity, req.MaxQuantity
+	if minInput == nil {
+		minInput = &p.MinQuantity
+	}
+	if maxInput == nil {
+		maxInput = &p.MaxQuantity
+	}
+	minQuantity, maxQuantity, err := normalizeQuantityBounds(minInput, maxInput)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	licenseTypeForQuantity := p.LicenseType
+	if req.LicenseType != nil {
+		licenseTypeForQuantity = *req.LicenseType
+	}
+	perSeatChanged := req.PerSeat != nil && *req.PerSeat != p.PerSeat
+	if perSeatChanged {
+		if n, err := h.Store.PlanLicenseCount(c, p.ID); err != nil {
+			response.Internal(c, err)
+			return
+		} else if n > 0 {
+			response.ErrWithDetails(c, http.StatusConflict, "HAS_LICENSES",
+				"cannot change per-seat mode of a plan that has licenses; move them to another plan first", gin.H{"license_count": n})
+			return
+		}
+	}
+	if perSeat && licenseTypeForQuantity != "subscription" {
+		response.BadRequest(c, "per_seat is only supported for subscription plans")
 		return
 	}
 
@@ -1121,6 +1197,15 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	if req.MaxSeats != nil && *req.MaxSeats > 0 && !model.ProductSupports(prod.Type, model.CapSeats) {
 		response.Err(c, http.StatusBadRequest, "INCOMPATIBLE_PRODUCT_TYPE",
 			"max_seats is not supported for "+prod.Type+" products")
+		return
+	}
+	finalMaxSeats := p.MaxSeats
+	if req.MaxSeats != nil {
+		finalMaxSeats = *req.MaxSeats
+	}
+	if perSeat && finalMaxSeats > 0 && !model.ProductSupports(prod.Type, model.CapSeats) {
+		response.Err(c, http.StatusBadRequest, "INCOMPATIBLE_PRODUCT_TYPE",
+			"per_seat plans with max_seats are not supported for "+prod.Type+" products")
 		return
 	}
 	if req.LicenseModel != nil {
@@ -1286,6 +1371,18 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		p.MaxSeats = *req.MaxSeats
 		cols = append(cols, "max_seats")
 	}
+	if req.PerSeat != nil {
+		p.PerSeat = *req.PerSeat
+		cols = append(cols, "per_seat")
+	}
+	if req.MinQuantity != nil {
+		p.MinQuantity = minQuantity
+		cols = append(cols, "min_quantity")
+	}
+	if req.MaxQuantity != nil {
+		p.MaxQuantity = maxQuantity
+		cols = append(cols, "max_quantity")
+	}
 	if req.TrialDays != nil {
 		p.TrialDays = *req.TrialDays
 		cols = append(cols, "trial_days")
@@ -1357,7 +1454,7 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		StripeRenewalPriceID: req.StripeRenewalPriceID,
 		LicenseType:          req.LicenseType,
 	}
-	if err := h.updatePlan(c, p, needsGatedFeed, typeChanged, terms, cols); err != nil {
+	if err := h.updatePlan(c, p, needsGatedFeed, typeChanged, req.PerSeat, terms, cols); err != nil {
 		var invalid *invalidTermsError
 		if errors.As(err, &invalid) {
 			response.BadRequest(c, invalid.msg)
@@ -1366,6 +1463,12 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		if errors.Is(err, store.ErrPlanHasLicenses) {
 			response.Err(c, http.StatusConflict, "HAS_LICENSES",
 				"cannot change the license type of a plan that has licenses; move them to another plan first")
+			return
+		}
+		var perSeatConflict *perSeatToggleConflict
+		if errors.As(err, &perSeatConflict) {
+			response.ErrWithDetails(c, http.StatusConflict, "HAS_LICENSES",
+				"cannot change per-seat mode of a plan that has licenses; move them to another plan first", gin.H{"license_count": perSeatConflict.count})
 			return
 		}
 		if feedGateRefused(c, err) {
@@ -1814,6 +1917,28 @@ func validatePlanNumericBounds(b planBounds) error {
 	return nil
 }
 
+// normalizeQuantityBounds supplies the legacy-safe 1..1 defaults when
+// omitted, while still distinguishing omission from an explicit zero.
+func normalizeQuantityBounds(minQuantity, maxQuantity *int) (int, int, error) {
+	min, max := 1, 1
+	if minQuantity != nil {
+		min = *minQuantity
+	}
+	if maxQuantity != nil {
+		max = *maxQuantity
+	}
+	if min < 1 || max < 1 {
+		return 0, 0, fmt.Errorf("min_quantity and max_quantity must be at least 1")
+	}
+	if min > max {
+		return 0, 0, fmt.Errorf("min_quantity cannot exceed max_quantity")
+	}
+	if max > 10000 {
+		return 0, 0, fmt.Errorf("max_quantity cannot exceed 10000")
+	}
+	return min, max, nil
+}
+
 // validateScopes rejects unknown scope strings. Keeping the check at
 // the boundary catches typos that would otherwise produce a silently
 // powerless key.
@@ -1977,6 +2102,7 @@ func (h *AdminHandler) CreateLicense(c *gin.Context) {
 		// plan decides: trial plans get now+trial_days, everything else
 		// is perpetual. When set it wins over the trial default.
 		ValidUntil string `json:"valid_until"`
+		Quantity   *int   `json:"quantity"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "product_id, plan_id, and email are required")
@@ -2031,6 +2157,17 @@ func (h *AdminHandler) CreateLicense(c *gin.Context) {
 			"plan does not belong to the requested product")
 		return
 	}
+	quantity := 1
+	if plan.PerSeat {
+		quantity = plan.MinQuantity
+		if req.Quantity != nil {
+			quantity = *req.Quantity
+		}
+		if quantity < plan.MinQuantity || quantity > plan.MaxQuantity {
+			response.BadRequest(c, fmt.Sprintf("quantity must be between %d and %d", plan.MinQuantity, plan.MaxQuantity))
+			return
+		}
+	}
 	// API-key scoping: a key bound to product A can't mint a license
 	// for product B even if it carries licenses:write.
 	if !requireKeyProductScope(c, req.ProductID) {
@@ -2045,12 +2182,14 @@ func (h *AdminHandler) CreateLicense(c *gin.Context) {
 	l := &model.License{
 		ProductID:           req.ProductID,
 		PlanID:              req.PlanID,
+		Plan:                plan,
 		Email:               req.Email,
 		LicenseKey:          license.GenerateKey(""),
 		Status:              status,
 		Notes:               req.Notes,
 		ExternalCustomerID:  req.ExternalCustomerID,
 		ExternalWorkspaceID: req.ExternalWorkspaceID,
+		Quantity:            quantity,
 	}
 
 	// Set valid_until: an explicit request value wins, otherwise trial
@@ -2143,6 +2282,10 @@ type licenseWithKey struct {
 	LicenseKey string `json:"license_key"`
 }
 
+func (out licenseWithKey) MarshalJSON() ([]byte, error) {
+	return marshalLicenseExtras(out.License, map[string]any{"license_key": out.LicenseKey})
+}
+
 // licenseWithHint is a licence payload with the last four characters of
 // its key attached, for the detail view.
 type licenseWithHint struct {
@@ -2153,6 +2296,38 @@ type licenseWithHint struct {
 	// offers to resend the key only when it works.
 	KeyUsable         bool   `json:"key_usable"`
 	KeyUnusableReason string `json:"key_unusable_reason,omitempty"`
+}
+
+func (out licenseWithHint) MarshalJSON() ([]byte, error) {
+	extra := map[string]any{
+		"license_key_hint": out.LicenseKeyHint,
+		"key_usable":       out.KeyUsable,
+	}
+	if out.KeyUnusableReason != "" {
+		extra["key_unusable_reason"] = out.KeyUnusableReason
+	}
+	return marshalLicenseExtras(out.License, extra)
+}
+
+func marshalLicenseExtras(lic *model.License, extras map[string]any) ([]byte, error) {
+	fields := map[string]json.RawMessage{}
+	if lic != nil {
+		body, err := json.Marshal(lic)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(body, &fields); err != nil {
+			return nil, err
+		}
+	}
+	for key, value := range extras {
+		body, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		fields[key] = body
+	}
+	return json.Marshal(fields)
 }
 
 // apperrCode is the machine-readable code of an apperr error, or
@@ -2516,6 +2691,64 @@ func (h *AdminHandler) SetLicenseValidUntil(c *gin.Context) {
 				"license_id": id, "email": lic.Email, "status": status,
 			})
 		}
+	}
+	response.OK(c, lic)
+}
+
+// SetLicenseQuantity changes a manually issued per-seat licence. Stripe
+// owns the quantity of any subscription-backed licence.
+func (h *AdminHandler) SetLicenseQuantity(c *gin.Context) {
+	var req struct {
+		Quantity *int `json:"quantity"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Quantity == nil {
+		response.BadRequest(c, "quantity is required")
+		return
+	}
+	lic, err := h.Store.FindLicenseByID(c, c.Param("id"))
+	if err != nil {
+		response.NotFound(c, "license not found")
+		return
+	}
+	if !requireKeyProductScope(c, lic.ProductID) {
+		return
+	}
+	if lic.StripeSubscriptionID != "" {
+		response.Conflict(c, "STRIPE_MANAGED", "quantity is managed by Stripe for subscription-backed licenses", nil)
+		return
+	}
+	plan, err := h.Store.FindPlanByID(c, lic.PlanID)
+	if err != nil {
+		response.Internal(c, err)
+		return
+	}
+	if !plan.PerSeat {
+		response.BadRequest(c, "quantity can only be changed for per-seat plans")
+		return
+	}
+	if *req.Quantity < plan.MinQuantity || *req.Quantity > plan.MaxQuantity {
+		response.BadRequest(c, fmt.Sprintf("quantity must be between %d and %d", plan.MinQuantity, plan.MaxQuantity))
+		return
+	}
+	oldQuantity := lic.Quantity
+	if oldQuantity == *req.Quantity {
+		response.OK(c, lic)
+		return
+	}
+	lic.Quantity = *req.Quantity
+	if err := h.Store.UpdateLicense(c, lic, "quantity"); err != nil {
+		response.Internal(c, err)
+		return
+	}
+	h.Store.Audit(c, &model.AuditLog{
+		Entity: "license", EntityID: lic.ID, Action: "quantity_changed",
+		ActorType: "admin", ActorID: adminID(c),
+		Changes: map[string]any{"old": oldQuantity, "new": lic.Quantity},
+	})
+	if h.Webhook != nil {
+		h.Webhook.Dispatch(c, lic.ProductID, model.EventLicenseQuantityChanged, map[string]any{
+			"license_id": lic.ID, "old_quantity": oldQuantity, "new_quantity": lic.Quantity,
+		})
 	}
 	response.OK(c, lic)
 }
@@ -3416,6 +3649,7 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 	// that log to answer "why is this licence active now" and "who
 	// moved its expiry date".
 	newStatus, newValidUntil := "", ""
+	oldQuantity, newQuantity := 0, 0
 	if h.beforeCutoffWrite != nil {
 		h.beforeCutoffWrite()
 	}
@@ -3478,6 +3712,20 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 		// of the old one is closed with it.
 		update := store.UpdateLicenseIn
 		cols := []string{"plan_id"}
+		oldQuantity, newQuantity = locked.Quantity, locked.Quantity
+		if !newPlan.PerSeat {
+			if fromPlan.PerSeat {
+				newQuantity = 1
+			}
+		} else if !fromPlan.PerSeat {
+			newQuantity = newPlan.ClampQuantity(1)
+		} else {
+			newQuantity = newPlan.ClampQuantity(newQuantity)
+		}
+		if newQuantity != oldQuantity {
+			l.Quantity = newQuantity
+			cols = append(cols, "quantity")
+		}
 		grantsPeriod := false
 		switch {
 		case newPlan.LicenseType != "perpetual":
@@ -3619,6 +3867,18 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 			map[string]any{"old_plan_id": oldPlanID, "new_plan_id": req.PlanID},
 			"status", newStatus), "valid_until", newValidUntil),
 	})
+	if newQuantity != oldQuantity {
+		h.Store.Audit(c, &model.AuditLog{
+			Entity: "license", EntityID: id, Action: "quantity_changed",
+			ActorType: "admin", ActorID: adminID(c),
+			Changes: map[string]any{"old": oldQuantity, "new": newQuantity},
+		})
+		if h.Webhook != nil {
+			h.Webhook.Dispatch(c, l.ProductID, model.EventLicenseQuantityChanged, map[string]any{
+				"license_id": id, "old_quantity": oldQuantity, "new_quantity": newQuantity,
+			})
+		}
+	}
 
 	if h.Webhook != nil {
 		h.Webhook.Dispatch(c, l.ProductID, "plan.changed", map[string]any{

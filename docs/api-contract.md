@@ -150,3 +150,66 @@ Decide from the status, not the code:
   goes to the server log. Worth one retry.
 - **4xx otherwise** the request is the problem; retrying it unchanged
   will not help.
+
+## Per-seat subscription quantities
+
+Per-seat billing is opt-in on subscription plans. Plan JSON adds
+`per_seat`, `min_quantity`, and `max_quantity`; the quantity bounds are
+inclusive and must satisfy `1 ≤ min_quantity ≤ max_quantity ≤ 10000`.
+New plans default omitted bounds to 1; bounds on a non-per-seat plan are
+reported but do not affect checkout quantity.
+
+Both `GET /products/:product_slug/plans` and session-authenticated
+`GET /portal/plans?product_id=…` include the three per-seat fields in
+each plan. The purchase link remains `GET /pay/:checkout_id`; add
+`?quantity=N` for a per-seat plan. The default is `min_quantity`, and an
+out-of-range or malformed quantity answers plain-text `400`. The JSON
+checkout handler also accepts `{"price_id":"…","quantity":N}` and
+answers an envelope `400` for an invalid per-seat quantity when mounted
+by an integrator; it is not currently registered as a public route.
+Non-per-seat checkouts ignore the requested quantity and use one.
+
+For a per-seat license, the purchased `quantity` multiplies the plan's
+finite activation and seat caps. The owner uses one seat, so when the
+seat cap is finite invitations are limited to
+`effective_max_seats - 1`. For other plans the existing limits and owner
+behavior remain in force. A cap of zero in
+`effective_max_activations` or `effective_max_seats` means unlimited;
+`quantity` is always at least one. Admin and portal license JSON add
+`quantity`, `effective_max_activations`, and `effective_max_seats`, with
+the limits calculated by Keygate. Responses that do not load a plan omit
+the effective-limit fields; create-license responses include them by
+hydrating the selected plan.
+
+Reducing quantity never removes members, activations, or active floating
+sessions. New invitations and activations are refused when current use is
+at or above the effective cap. A finite one-seat per-seat plan therefore
+allows zero invitations and answers `409 SEAT_LIMIT` for an invite.
+
+`POST /admin/plans` and `PUT /admin/plans/:id` accept the three plan
+fields. `per_seat: true` requires `license_type: "subscription"`.
+Changing `per_seat` is refused with `409 HAS_LICENSES` (including the
+license count) while any licenses remain on that plan; move the licenses
+to another plan first. Per-seat to per-seat plan changes clamp the current
+quantity into the destination plan's `[min_quantity, max_quantity]` range.
+`POST /admin/licenses` accepts optional `quantity` for a per-seat plan;
+omitting it uses that plan's minimum. Manually issued per-seat licenses
+can change quantity with `POST /admin/licenses/:id/quantity` and body
+`{"quantity":N}`. Stripe-backed licenses cannot be changed there and
+answer `409 STRIPE_MANAGED`; customers change quantity in Stripe's
+billing portal when the merchant enables quantity updates.
+
+Stripe synchronization and manual quantity updates emit
+`license.quantity_changed` with
+`{"license_id":"…","old_quantity":N,"new_quantity":M}`. The admin
+quantity endpoint also records the change as an audit entry; the event
+is also selectable in webhook settings. A plan
+change between per-seat plans clamps the current quantity to the
+destination bounds. Moving from a per-seat plan to a non-per-seat plan
+sets quantity to one. Moving from a non-per-seat plan to a per-seat plan
+starts at one and clamps it to the destination bounds. Legacy-to-legacy
+plan changes leave quantity untouched. The portal refuses plan changes
+for suspended, revoked, or canceled licenses with `409
+LICENSE_PLAN_CHANGE_UNAVAILABLE`. Customers change subscription quantity through
+`POST /portal/subscription/billing-portal`; the merchant must enable
+quantity updates in Stripe's customer portal.

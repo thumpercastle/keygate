@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"slices"
 	"time"
 
@@ -244,6 +245,9 @@ type Plan struct {
 	// CREATE-TABLE default for legacy data, but the handler is now the
 	// sole source of truth for these values.
 	MaxActivations int    `bun:",notnull" json:"max_activations"`
+	PerSeat        bool   `bun:",notnull" json:"per_seat"`
+	MinQuantity    int    `bun:",notnull" json:"min_quantity"`
+	MaxQuantity    int    `bun:",notnull" json:"max_quantity"`
 	TrialDays      int    `bun:",notnull" json:"trial_days"`
 	GraceDays      int    `bun:",notnull" json:"grace_days"`
 	StripePriceID  string `json:"stripe_price_id,omitempty"`
@@ -266,6 +270,30 @@ type Plan struct {
 
 	Product      *Product       `bun:"rel:belongs-to,join:product_id=id" json:"product,omitempty"`
 	Entitlements []*Entitlement `bun:"rel:has-many,join:id=plan_id" json:"entitlements,omitempty"`
+}
+
+// ClampQuantity returns a per-seat quantity within the plan's configured bounds.
+// Non-per-seat plans always use quantity one. Missing or invalid in-memory
+// bounds fall back to one, matching the persisted plan defaults.
+func (p *Plan) ClampQuantity(quantity int) int {
+	if p == nil || !p.PerSeat {
+		return 1
+	}
+	min := p.MinQuantity
+	if min < 1 {
+		min = 1
+	}
+	max := p.MaxQuantity
+	if max < min {
+		max = min
+	}
+	if quantity < min {
+		return min
+	}
+	if quantity > max {
+		return max
+	}
+	return quantity
 }
 
 // ─── Entitlement (feature flags per plan) ───
@@ -330,6 +358,7 @@ type License struct {
 	// that created this license. charge.refunded carries the same id, so
 	// a refund can be matched to exactly this license.
 	StripePaymentIntentID string `bun:",notnull,default:''" json:"stripe_payment_intent_id,omitempty"`
+	Quantity              int    `bun:",notnull" json:"quantity"`
 	// StripeCheckoutSessionID is the checkout session that created the
 	// license; fulfilment retries use it to see whether the session
 	// already produced one.
@@ -391,6 +420,90 @@ type License struct {
 	ActiveSessionCount int             `bun:"active_session_count,scanonly" json:"active_session_count"`
 	Seats              []*Seat         `bun:"rel:has-many,join:id=license_id" json:"seats,omitempty"`
 	Addons             []*LicenseAddon `bun:"rel:has-many,join:id=license_id" json:"addons,omitempty"`
+}
+
+// Limit describes a cap without conflating a finite zero (for example,
+// zero invitation slots when the owner occupies the only seat) with no cap.
+type Limit struct {
+	Value     int
+	Unlimited bool
+}
+
+// Limits are the quantity-adjusted caps used by license enforcement.
+type Limits struct {
+	Activations Limit
+	Seats       Limit
+	Invitations Limit
+}
+
+// EffectiveLimits returns activation, seat (including the owner for per-seat
+// plans), and invitation caps. A nil plan keeps the historical defaults:
+// three activations and unlimited seats. Quantity zero is treated as one for
+// legacy in-memory license values created before quantity existed in storage.
+func (l *License) EffectiveLimits() Limits {
+	if l == nil || l.Plan == nil {
+		return Limits{
+			Activations: Limit{Value: 3},
+			Seats:       Limit{Unlimited: true},
+			Invitations: Limit{Unlimited: true},
+		}
+	}
+
+	activations := l.Plan.MaxActivations
+	seats := l.Plan.MaxSeats
+	if !l.Plan.PerSeat {
+		return Limits{
+			Activations: limitFor(activations),
+			Seats:       limitFor(seats),
+			Invitations: limitFor(seats),
+		}
+	}
+	quantity := l.Quantity
+	if quantity < 1 {
+		quantity = 1
+	}
+	activationsLimit := scaleLimit(activations, quantity)
+	seatsLimit := scaleLimit(seats, quantity)
+	invitationsLimit := seatsLimit
+	if !seatsLimit.Unlimited {
+		invitationsLimit.Value--
+	}
+	return Limits{Activations: activationsLimit, Seats: seatsLimit, Invitations: invitationsLimit}
+}
+
+func limitFor(value int) Limit {
+	if value <= 0 {
+		return Limit{Unlimited: true}
+	}
+	return Limit{Value: value}
+}
+
+func scaleLimit(value, quantity int) Limit {
+	if value <= 0 {
+		return Limit{Unlimited: true}
+	}
+	if quantity > int(^uint(0)>>1)/value {
+		return Limit{Value: int(^uint(0) >> 1)}
+	}
+	return Limit{Value: value * quantity}
+}
+
+// MarshalJSON adds the quantity-adjusted caps to every license payload while
+// retaining the established field names and omitempty behavior.
+func (l License) MarshalJSON() ([]byte, error) {
+	type licenseJSON License
+	payload := struct {
+		licenseJSON
+		EffectiveMaxActivations *int `json:"effective_max_activations,omitempty"`
+		EffectiveMaxSeats       *int `json:"effective_max_seats,omitempty"`
+	}{licenseJSON: licenseJSON(l)}
+	if l.Plan != nil {
+		limits := (&l).EffectiveLimits()
+		activations, seats := limits.Activations.Value, limits.Seats.Value
+		payload.EffectiveMaxActivations = &activations
+		payload.EffectiveMaxSeats = &seats
+	}
+	return json.Marshal(payload)
 }
 
 const (
@@ -791,19 +904,20 @@ type MeteredBilling struct {
 
 // Webhook event constants
 const (
-	EventLicenseCreated    = "license.created"
-	EventLicenseCanceled   = "license.canceled"
-	EventLicenseSuspended  = "license.suspended"
-	EventLicenseReinstated = "license.reinstated"
-	EventLicenseRevoked    = "license.revoked"
-	EventQuotaWarning      = "quota.warning"
-	EventQuotaExceeded     = "quota.exceeded"
-	EventSeatAdded         = "seat.added"
-	EventSeatRemoved       = "seat.removed"
-	EventPlanChanged       = "plan.changed"
-	EventReleasePublished  = "release.published"
-	EventReleaseYanked     = "release.yanked"
-	EventReleaseUnyanked   = "release.unyanked"
+	EventLicenseCreated         = "license.created"
+	EventLicenseCanceled        = "license.canceled"
+	EventLicenseSuspended       = "license.suspended"
+	EventLicenseReinstated      = "license.reinstated"
+	EventLicenseRevoked         = "license.revoked"
+	EventQuotaWarning           = "quota.warning"
+	EventQuotaExceeded          = "quota.exceeded"
+	EventSeatAdded              = "seat.added"
+	EventSeatRemoved            = "seat.removed"
+	EventPlanChanged            = "plan.changed"
+	EventLicenseQuantityChanged = "license.quantity_changed"
+	EventReleasePublished       = "release.published"
+	EventReleaseYanked          = "release.yanked"
+	EventReleaseUnyanked        = "release.unyanked"
 )
 
 // ─── Release (logical release event) ───

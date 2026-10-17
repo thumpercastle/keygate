@@ -67,8 +67,8 @@ servers:
         default: http://localhost:9000
         description: Your Keygate server URL
 
-# Public SDK endpoints have no auth at the route layer. Admin endpoints
-# (out of this doc) use BearerAuth or session cookies.
+# Public SDK endpoints have no auth at the route layer. Admin and portal
+# endpoints below use BearerAuth or session cookies as declared per route.
 security: []
 
 tags:
@@ -86,6 +86,12 @@ tags:
     description: License-gated download + auto-update feeds (Sparkle / Velopack / Tauri)
   - name: Site
     description: Public site configuration
+  - name: Billing
+    description: Public plans and checkout redirects
+  - name: Portal
+    description: Customer license management
+  - name: Admin
+    description: Administrative plan and license management
 
 paths:
   /config:
@@ -122,6 +128,547 @@ paths:
                       attribution_url:
                         type: string
                         description: Link for the attribution notice. Required by the license.
+  /products/{product_slug}/plans:
+    get:
+      tags: [Billing]
+      summary: List public plans for a product
+      parameters:
+        - $ref: "#/components/parameters/ProductSlug"
+      responses:
+        "200":
+          description: Active plans available to purchase
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      plans:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            name: { type: string }
+                            slug: { type: string }
+                            license_type: { type: string, enum: [subscription, perpetual, trial] }
+                            billing_interval: { type: string }
+                            per_seat: { type: boolean }
+                            min_quantity: { type: integer, minimum: 1 }
+                            max_quantity: { type: integer, minimum: 1, maximum: 10000 }
+                            checkout_id: { type: string, minLength: 8, maxLength: 8 }
+                            price: { type: integer, format: int64, nullable: true }
+                            currency: { type: string, nullable: true }
+        "404":
+          description: Product not found
+
+  /pay/{checkout_id}:
+    servers:
+      - url: "{origin}"
+        variables:
+          origin:
+            default: http://localhost:9000
+            description: Server origin; this route is outside /api/v1
+    get:
+      tags: [Billing]
+      summary: Redirect to Stripe Checkout for a plan
+      description: |
+        Per-seat plans accept a requested quantity and default to the
+        plan's `min_quantity`. Non-per-seat plans always check out one
+        unit and ignore this query parameter.
+      parameters:
+        - name: checkout_id
+          in: path
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 8 }
+        - name: quantity
+          in: query
+          required: false
+          description: Requested per-seat quantity, inclusive of plan bounds
+          schema: { type: integer, minimum: 1, maximum: 10000 }
+      responses:
+        "307":
+          description: Temporary redirect (307) to Stripe Checkout
+        "400":
+          description: Plain-text invalid quantity or checkout identifier
+        "404":
+          description: Plan not found
+        "503":
+          description: Plan or payment configuration temporarily unavailable
+
+  /portal/licenses:
+    get:
+      tags: [Portal]
+      summary: List licenses associated with the signed-in customer
+      description: Includes licenses owned by the customer and licenses where the customer has an active, non-removed seat.
+      security:
+        - CookieAuth: []
+      responses:
+        "200":
+          description: Customer licenses and renewal availability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      licenses:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PortalLicense"
+                      renewals_enabled: { type: boolean }
+        "401":
+          description: Customer session required
+
+  /portal/plans:
+    get:
+      tags: [Portal]
+      summary: List active plans for a product
+      security:
+        - CookieAuth: []
+      parameters:
+        - name: product_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Active plans, including per-seat quantity bounds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      plans:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            name: { type: string }
+                            slug: { type: string }
+                            license_type: { type: string }
+                            billing_interval: { type: string }
+                            stripe_price_id: { type: string }
+                            checkout_id: { type: string }
+                            per_seat: { type: boolean }
+                            min_quantity: { type: integer, minimum: 1, maximum: 10000 }
+                            max_quantity: { type: integer, minimum: 1, maximum: 10000 }
+        "400":
+          description: product_id is required
+        "401":
+          description: Customer session required
+
+  /portal/subscription/billing-portal:
+    post:
+      tags: [Portal]
+      summary: Open Stripe's billing portal
+      description: |
+        The merchant must enable quantity updates in Stripe's customer
+        portal for customers to change a per-seat subscription quantity.
+      security:
+        - CookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [license_id]
+              properties:
+                license_id: { type: string, format: uuid }
+                return_url: { type: string, format: uri }
+      responses:
+        "200":
+          description: Stripe billing portal URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      url: { type: string, format: uri }
+        "400":
+          description: Missing license ID or no Stripe customer on license
+        "403":
+          description: License does not belong to the signed-in customer
+
+  /portal/subscription/change-plan:
+    post:
+      tags: [Portal]
+      summary: Change a subscription plan
+      description: |
+        Per-seat to per-seat plan changes clamp the current quantity to
+        the destination bounds. Moving to a
+        non-per-seat plan sets quantity to one. Moving from a non-per-seat
+        plan to a per-seat plan starts at one and clamps to destination
+        bounds. Legacy-to-legacy changes leave quantity untouched.
+        Suspended, revoked, or canceled licenses cannot change plans.
+      security:
+        - CookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [license_id, new_price_id]
+              properties:
+                license_id: { type: string, format: uuid }
+                new_price_id: { type: string }
+                prorate: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Plan changed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, enum: [plan_changed] }
+                      new_plan_id: { type: string }
+                      new_plan_name: { type: string }
+                      proration: { type: string }
+        "400":
+          description: Invalid or unavailable target plan
+        "409":
+          description: License cannot change plans in its current state (LICENSE_PLAN_CHANGE_UNAVAILABLE)
+        "403":
+          description: License does not belong to the signed-in customer
+
+  /admin/plans:
+    get:
+      tags: [Admin]
+      summary: List plans
+      security:
+        - BearerAuth: []
+        - CookieAuth: []
+      responses:
+        "200":
+          description: Paginated plans, including quantity bounds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      plans:
+                        type: array
+                        items: { $ref: "#/components/schemas/Plan" }
+                      total: { type: integer }
+                      limit: { type: integer }
+                      offset: { type: integer }
+    post:
+      tags: [Admin]
+      summary: Create a plan
+      security:
+        - BearerAuth: []
+        - CookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id, name, slug, license_type]
+              properties:
+                product_id: { type: string }
+                name: { type: string }
+                slug: { type: string }
+                license_type: { type: string, enum: [subscription, perpetual, trial] }
+                per_seat: { type: boolean, default: false }
+                min_quantity: { type: integer, minimum: 1, maximum: 10000, default: 1 }
+                max_quantity: { type: integer, minimum: 1, maximum: 10000, default: 1 }
+              description: per_seat is only valid for subscription plans; bounds require 1 ≤ min_quantity ≤ max_quantity ≤ 10000
+      responses:
+        "201":
+          description: Created plan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    $ref: "#/components/schemas/Plan"
+        "400":
+          description: Invalid plan fields or quantity bounds
+  /admin/plans/{id}:
+    get:
+      tags: [Admin]
+      summary: Get a plan
+      security:
+        - BearerAuth: []
+        - CookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Plan, including per-seat settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: "#/components/schemas/Plan" }
+        "404":
+          description: Plan not found
+    put:
+      tags: [Admin]
+      summary: Update a plan
+      security:
+        - BearerAuth: []
+        - CookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                per_seat: { type: boolean }
+                min_quantity: { type: integer, minimum: 1, maximum: 10000 }
+                max_quantity: { type: integer, minimum: 1, maximum: 10000 }
+              description: Optional fields; per_seat is only valid for subscription plans and bounds require 1 ≤ min_quantity ≤ max_quantity ≤ 10000.
+      responses:
+        "200":
+          description: Updated plan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    $ref: "#/components/schemas/Plan"
+        "400":
+          description: Invalid plan fields or quantity bounds
+        "409":
+          description: Cannot toggle per_seat while licenses remain on the plan (HAS_LICENSES with license_count)
+        "404":
+          description: Plan not found
+
+  /admin/licenses:
+    get:
+      tags: [Admin]
+      summary: List licenses
+      security:
+        - LicenseWriteAuth: []
+        - BearerAuth: []
+        - CookieAuth: []
+      responses:
+        "200":
+          description: Paginated licenses with effective limits and quantity
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      licenses:
+                        type: array
+                        items: { $ref: "#/components/schemas/License" }
+                      total: { type: integer }
+                      limit: { type: integer }
+                      offset: { type: integer }
+                      license_key_hints:
+                        type: object
+                        additionalProperties: { type: string }
+    post:
+      tags: [Admin]
+      summary: Create a manually issued license
+      security:
+        - LicenseWriteAuth: []
+        - BearerAuth: []
+        - CookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id, plan_id, email]
+              properties:
+                product_id: { type: string }
+                plan_id: { type: string }
+                email: { type: string, format: email }
+                quantity:
+                  type: integer
+                  minimum: 1
+                  maximum: 10000
+                  description: Optional for per-seat plans; omitted quantity defaults to min_quantity and non-per-seat plans ignore it.
+      responses:
+        "201":
+          description: Created license; includes the license key once
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    allOf:
+                      - $ref: "#/components/schemas/License"
+                      - type: object
+                        properties:
+                          license_key: { type: string }
+        "400":
+          description: Invalid quantity or license fields
+
+  /admin/licenses/{id}/quantity:
+    post:
+      tags: [Admin]
+      summary: Change a manually issued per-seat license quantity
+      security:
+        - LicenseWriteAuth: []
+        - BearerAuth: []
+        - CookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                quantity: { type: integer, minimum: 1, maximum: 10000 }
+      responses:
+        "200":
+          description: Updated license
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    $ref: "#/components/schemas/License"
+        "400":
+          description: Quantity is invalid or the plan is not per-seat
+        "404":
+          description: License not found
+        "409":
+          description: Stripe-backed quantity is managed by Stripe (`STRIPE_MANAGED`)
+
+  /admin/licenses/{id}/change-plan:
+    post:
+      tags: [Admin]
+      summary: Change the plan of a manually issued license
+      description: |
+        A Stripe-backed license is managed through the customer portal.
+        Per-seat to per-seat clamps quantity to the target bounds; changing
+        from per-seat to non-per-seat resets it to one; moving from a
+        non-per-seat plan to a per-seat plan starts at one and clamps it to
+        target bounds. Legacy-to-legacy changes leave quantity untouched.
+      security:
+        - LicenseWriteAuth: []
+        - BearerAuth: []
+        - CookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan_id]
+              properties:
+                plan_id: { type: string }
+      responses:
+        "200":
+          description: License plan changed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, enum: [plan_changed] }
+                      plan_id: { type: string }
+        "400":
+          description: Plan is invalid or belongs to another product
+        "404":
+          description: License or plan not found
+        "409":
+          description: Stripe-backed license must be changed through the customer portal
+
+  /admin/licenses/{id}:
+    get:
+      tags: [Admin]
+      summary: Get license details
+      security:
+        - LicenseWriteAuth: []
+        - BearerAuth: []
+        - CookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: License details with quantity, effective caps, and a redacted key hint
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    allOf:
+                      - $ref: "#/components/schemas/License"
+                      - type: object
+                        properties:
+                          license_key_hint: { type: string }
+                          key_usable: { type: boolean }
+                          key_unusable_reason: { type: string }
+        "404":
+          description: License not found
+
   /license/pubkey:
     get:
       tags: [License]
@@ -990,6 +1537,10 @@ components:
         Admin API key (`kg_live_…`). Used for server-to-server
         access to `/admin/*` (NOT for public SDK endpoints in this
         document). Requires the `admin` scope. Mint in dashboard.
+    LicenseWriteAuth:
+      type: http
+      scheme: bearer
+      description: Admin API key with `licenses:write` or `admin` scope.
     CookieAuth:
       type: apiKey
       in: cookie
@@ -1017,6 +1568,75 @@ components:
               SHA256: { type: string }
               Size: { type: integer, format: int64 }
               NotesMarkdown: { type: string }
+    Plan:
+      type: object
+      description: Plan response. A zero effective limit means unlimited.
+      properties:
+        id: { type: string }
+        product_id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        checkout_id: { type: string }
+        license_type: { type: string, enum: [subscription, perpetual, trial] }
+        billing_interval: { type: string }
+        max_activations: { type: integer }
+        max_seats: { type: integer }
+        per_seat: { type: boolean }
+        min_quantity: { type: integer, minimum: 1, maximum: 10000 }
+        max_quantity: { type: integer, minimum: 1, maximum: 10000 }
+    License:
+      type: object
+      description: License response. Effective limits are calculated by Keygate; zero means unlimited.
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: string }
+        plan_id: { type: string }
+        email: { type: string, format: email }
+        status: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        effective_max_activations:
+          type: integer
+          description: Quantity-adjusted activation cap; 0 means unlimited.
+        effective_max_seats:
+          type: integer
+          description: Quantity-adjusted people cap, including the owner on per-seat plans; 0 means unlimited.
+        plan:
+          $ref: "#/components/schemas/Plan"
+    PortalLicense:
+      allOf:
+        - $ref: "#/components/schemas/License"
+        - type: object
+          properties:
+            license_key:
+              type: string
+              description: The signed-in customer's own license key.
+    CheckoutSessionRequest:
+      type: object
+      description: |
+        Input shape accepted by the Stripe CreateCheckoutSession handler.
+        This handler is not currently registered as an HTTP route; public
+        checkout uses GET /pay/{checkout_id} instead.
+      required: [price_id]
+      properties:
+        price_id: { type: string }
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: Requested per-seat quantity; omitted defaults to min_quantity. Ignored for other plans.
+        email: { type: string, format: email }
+        success_url: { type: string, format: uri }
+        cancel_url: { type: string, format: uri }
+    CheckoutSessionResponse:
+      type: object
+      description: Success envelope emitted by the unregistered checkout handler.
+      properties:
+        success: { type: boolean }
+        data:
+          type: object
+          properties:
+            url: { type: string, format: uri }
+            session_id: { type: string }
     ActivateResponse:
       type: object
       properties:

@@ -83,10 +83,8 @@ func (s *SeatService) AddSeat(ctx context.Context, in AddSeatInput) (*model.Seat
 		return nil, apperr.BadRequest("cannot invite the license owner — they already have access")
 	}
 
-	maxSeats := 0
-	if lic.Plan != nil {
-		maxSeats = lic.Plan.MaxSeats
-	}
+	invitationLimit := lic.EffectiveLimits().Invitations
+	maxSeats := invitationLimit.Value
 
 	// Mint the invite token BEFORE we hand the seat to the store.
 	// The plain token only leaves this function inside the email
@@ -108,7 +106,7 @@ func (s *SeatService) AddSeat(ctx context.Context, in AddSeatInput) (*model.Seat
 	// this, two concurrent adds can both pass the count check and
 	// both insert, overshooting max_seats. Also handles the
 	// restore-on-reinvite case (removed_at IS NOT NULL → un-remove).
-	outcome, err := s.store.AddSeatWithinLimit(ctx, seat, maxSeats)
+	outcome, err := s.store.AddSeatWithinCap(ctx, seat, invitationLimit)
 	if err != nil {
 		if errors.Is(err, store.ErrSeatLimitReached) {
 			current, _ := s.store.CountActiveSeats(ctx, lic.ID)
@@ -279,7 +277,13 @@ func (s *SeatService) CheckSeatAccess(ctx context.Context, licenseKey, email, pr
 	if productID != "" && lic.ProductID != productID {
 		return false, nil
 	}
-	if lic.Plan == nil || lic.Plan.MaxSeats == 0 {
+	if lic.Plan == nil {
+		return true, nil
+	}
+	if lic.Plan.PerSeat && strings.EqualFold(strings.TrimSpace(email), lic.Email) {
+		return true, nil
+	}
+	if lic.EffectiveLimits().Seats.Unlimited {
 		return true, nil
 	}
 	_, err = s.store.FindSeatByEmail(ctx, lic.ID, email)

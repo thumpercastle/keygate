@@ -81,6 +81,17 @@ const (
 // maxSeats <= 0 means "no limit" (uniform with the rest of the code
 // that reads `lic.Plan.MaxSeats > 0` as the cap-active sentinel).
 func (s *Store) AddSeatWithinLimit(ctx context.Context, seat *model.Seat, maxSeats int) (SeatAddOutcome, error) {
+	limit := model.Limit{Value: maxSeats}
+	if maxSeats <= 0 {
+		limit = model.Limit{Unlimited: true}
+	}
+	return s.AddSeatWithinCap(ctx, seat, limit)
+}
+
+// AddSeatWithinCap applies an explicit invitation cap. Unlike the legacy
+// maxSeats API, a finite zero is a real zero-cap; existing seats still take
+// the idempotent/re-invite paths before capacity is checked.
+func (s *Store) AddSeatWithinCap(ctx context.Context, seat *model.Seat, limit model.Limit) (SeatAddOutcome, error) {
 	if seat.ID == "" {
 		seat.ID = newID()
 	}
@@ -138,7 +149,7 @@ func (s *Store) AddSeatWithinLimit(ctx context.Context, seat *model.Seat, maxSea
 	}
 
 	// Capacity check — only count rows that aren't soft-deleted.
-	if maxSeats > 0 {
+	if !limit.Unlimited {
 		var count int
 		if err := tx.NewRaw(
 			"SELECT COUNT(*) FROM seats WHERE license_id = ? AND removed_at IS NULL",
@@ -146,7 +157,7 @@ func (s *Store) AddSeatWithinLimit(ctx context.Context, seat *model.Seat, maxSea
 		).Scan(ctx, &count); err != nil {
 			return "", err
 		}
-		if count >= maxSeats {
+		if count >= limit.Value {
 			return "", ErrSeatLimitReached
 		}
 	}

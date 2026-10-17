@@ -114,6 +114,7 @@ func (h *StripeHandler) isSameOrigin(raw string) bool {
 func (h *StripeHandler) CreateCheckoutSession(c *gin.Context) {
 	var req struct {
 		PriceID    string `json:"price_id" binding:"required"`
+		Quantity   *int   `json:"quantity"`
 		Email      string `json:"email"`
 		SuccessURL string `json:"success_url"`
 		CancelURL  string `json:"cancel_url"`
@@ -131,6 +132,11 @@ func (h *StripeHandler) CreateCheckoutSession(c *gin.Context) {
 	if !h.sellableNow(c, plan) {
 		return
 	}
+	quantity, err := requestedPlanQuantity(plan, req.Quantity)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	success := h.BaseURL + "/checkout/success?session_id={CHECKOUT_SESSION_ID}"
 	if req.SuccessURL != "" && h.isSameOrigin(req.SuccessURL) {
@@ -146,10 +152,14 @@ func (h *StripeHandler) CreateCheckoutSession(c *gin.Context) {
 		mode = string(stripe.CheckoutSessionModePayment)
 	}
 
+	lineItem := &stripe.CheckoutSessionLineItemParams{Price: stripe.String(req.PriceID), Quantity: stripe.Int64(quantity)}
+	if plan.PerSeat {
+		lineItem.AdjustableQuantity = adjustableQuantity(plan)
+	}
 	params := &stripe.CheckoutSessionParams{
 		Mode: stripe.String(mode),
 		LineItems: []*stripe.CheckoutSessionLineItemParams{
-			{Price: stripe.String(req.PriceID), Quantity: stripe.Int64(1)},
+			lineItem,
 		},
 		SuccessURL:          stripe.String(success),
 		CancelURL:           stripe.String(cancel),
@@ -160,6 +170,7 @@ func (h *StripeHandler) CreateCheckoutSession(c *gin.Context) {
 		"product_id":    plan.ProductID,
 		metaUpdatesDays: strconv.Itoa(plan.UpdatesDays),
 		metaLicenseType: plan.LicenseType,
+		metaQuantity:    strconv.FormatInt(quantity, 10),
 	}
 	if req.Email != "" {
 		params.CustomerEmail = stripe.String(req.Email)
@@ -171,6 +182,29 @@ func (h *StripeHandler) CreateCheckoutSession(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"url": s.URL, "session_id": s.ID})
+}
+
+func requestedPlanQuantity(plan *model.Plan, requested *int) (int64, error) {
+	if plan == nil || !plan.PerSeat {
+		return 1, nil
+	}
+	if plan.MinQuantity < 1 || plan.MaxQuantity < plan.MinQuantity {
+		return 0, errors.New("plan quantity bounds are invalid")
+	}
+	quantity := plan.MinQuantity
+	if requested != nil {
+		quantity = *requested
+	}
+	if quantity < plan.MinQuantity || quantity > plan.MaxQuantity {
+		return 0, fmt.Errorf("quantity must be between %d and %d", plan.MinQuantity, plan.MaxQuantity)
+	}
+	return int64(quantity), nil
+}
+
+func adjustableQuantity(plan *model.Plan) *stripe.CheckoutSessionLineItemAdjustableQuantityParams {
+	return &stripe.CheckoutSessionLineItemAdjustableQuantityParams{
+		Enabled: stripe.Bool(true), Minimum: stripe.Int64(int64(plan.MinQuantity)), Maximum: stripe.Int64(int64(plan.MaxQuantity)),
+	}
 }
 
 // CheckoutByPlan handles GET /pay/:checkout_id — looks up plan by checkout_id,
@@ -201,6 +235,22 @@ func (h *StripeHandler) CheckoutByPlan(c *gin.Context) {
 		c.String(http.StatusServiceUnavailable, "payment not configured for this plan")
 		return
 	}
+	var requested *int
+	if plan.PerSeat {
+		if raw, ok := c.GetQuery("quantity"); ok {
+			q, parseErr := strconv.Atoi(raw)
+			if parseErr != nil {
+				c.String(http.StatusBadRequest, "invalid quantity")
+				return
+			}
+			requested = &q
+		}
+	}
+	quantity, err := requestedPlanQuantity(plan, requested)
+	if err != nil {
+		c.String(http.StatusBadRequest, "invalid quantity")
+		return
+	}
 
 	// Determine checkout mode from Stripe Price (source of truth, not local config)
 	sp, err := stripeprice.Get(plan.StripePriceID, nil)
@@ -214,10 +264,14 @@ func (h *StripeHandler) CheckoutByPlan(c *gin.Context) {
 		mode = string(stripe.CheckoutSessionModePayment)
 	}
 
+	lineItem := &stripe.CheckoutSessionLineItemParams{Price: stripe.String(plan.StripePriceID), Quantity: stripe.Int64(quantity)}
+	if plan.PerSeat {
+		lineItem.AdjustableQuantity = adjustableQuantity(plan)
+	}
 	params := &stripe.CheckoutSessionParams{
 		Mode: stripe.String(mode),
 		LineItems: []*stripe.CheckoutSessionLineItemParams{
-			{Price: stripe.String(plan.StripePriceID), Quantity: stripe.Int64(1)},
+			lineItem,
 		},
 		SuccessURL:          stripe.String(h.BaseURL + "/checkout/success?session_id={CHECKOUT_SESSION_ID}"),
 		CancelURL:           stripe.String(h.BaseURL + "/pricing"),
@@ -228,6 +282,7 @@ func (h *StripeHandler) CheckoutByPlan(c *gin.Context) {
 		"product_id":    plan.ProductID,
 		metaUpdatesDays: strconv.Itoa(plan.UpdatesDays),
 		metaLicenseType: plan.LicenseType,
+		metaQuantity:    strconv.FormatInt(quantity, 10),
 	}
 
 	s, err := session.New(params)
@@ -663,10 +718,11 @@ func (h *StripeHandler) fulfillCheckout(ctx context.Context, email, customerID, 
 		return h.fulfillRenewal(ctx, metadata, sessionID, paymentIntentID, source)
 	}
 	var plan *model.Plan
+	var stripeSub *stripe.Subscription
 	var err error
 
 	if subscriptionID != "" {
-		if plan, err = h.resolvePlan(ctx, subscriptionID); err != nil {
+		if plan, stripeSub, err = h.resolvePlan(ctx, subscriptionID); err != nil {
 			return false, fmt.Errorf("resolve plan from subscription: %w", err)
 		}
 	}
@@ -744,6 +800,12 @@ func (h *StripeHandler) fulfillCheckout(ctx context.Context, email, customerID, 
 		PaymentProvider:  "stripe",
 		StripeCustomerID: customerID,
 		Status:           status,
+		Quantity:         1,
+	}
+	if plan.PerSeat && stripeSub != nil {
+		if item := subscriptionItemForPlan(stripeSub, plan); item != nil && item.Quantity >= 1 {
+			lic.Quantity = int(item.Quantity)
+		}
 	}
 
 	if plan.LicenseType == "trial" && plan.TrialDays > 0 {
@@ -979,7 +1041,7 @@ func (h *StripeHandler) fulfillCheckout(ctx context.Context, email, customerID, 
 	h.Store.Audit(ctx, &model.AuditLog{
 		Entity: "license", EntityID: lic.ID, Action: "created",
 		ActorType: source,
-		Changes:   map[string]any{"provider": "stripe", "email": email, "plan": plan.Name},
+		Changes:   map[string]any{"provider": "stripe", "email": email, "plan": plan.Name, "quantity": lic.Quantity},
 	})
 
 	if h.WebhookSvc != nil {
@@ -1196,9 +1258,7 @@ func subscriptionEndsThisPeriod(sub *stripe.Subscription) bool {
 			if it == nil {
 				continue
 			}
-			ev.Items.Data = append(ev.Items.Data, struct {
-				CurrentPeriodEnd int64 `json:"current_period_end"`
-			}{it.CurrentPeriodEnd})
+			ev.Items.Data = append(ev.Items.Data, subscriptionItemEvent{CurrentPeriodEnd: it.CurrentPeriodEnd})
 		}
 	}
 	return ev.EndsThisPeriod()
@@ -1457,6 +1517,14 @@ func (e *invoiceEvent) SubscriptionID() string {
 // subscriptionEvent is the part of a subscription webhook payload
 // Keygate acts on. current_period_end moved from the subscription to
 // its items in API version 2025-03-31; read both.
+type subscriptionItemEvent struct {
+	CurrentPeriodEnd int64 `json:"current_period_end"`
+	Quantity         int64 `json:"quantity"`
+	Price            struct {
+		ID string `json:"id"`
+	} `json:"price"`
+}
+
 type subscriptionEvent struct {
 	ID               string `json:"id"`
 	Status           string `json:"status"`
@@ -1467,9 +1535,7 @@ type subscriptionEvent struct {
 	CancelAtPeriodEnd bool  `json:"cancel_at_period_end"`
 	CancelAt          int64 `json:"cancel_at"`
 	Items             struct {
-		Data []struct {
-			CurrentPeriodEnd int64 `json:"current_period_end"`
-		} `json:"data"`
+		Data []subscriptionItemEvent `json:"data"`
 	} `json:"items"`
 }
 
@@ -1525,34 +1591,29 @@ func (e *subscriptionEvent) PeriodEnd() int64 {
 // asOf, when set, is the StripeReadStamp taken before the Stripe read the
 // write comes from: a newer read already applied wins, and this one is
 // dropped (see store.UpdateLicenseFromSubscriptionRead).
-func (h *StripeHandler) applyLicenseFromSubscription(ctx context.Context, lic *model.License, event string, asOf *time.Time, cols ...string) bool {
-	var err error
-	if asOf != nil {
-		err = h.Store.UpdateLicenseFromSubscriptionRead(ctx, lic, *asOf, cols...)
-	} else {
-		err = h.Store.UpdateLicenseFromSubscription(ctx, lic, cols...)
-	}
+func (h *StripeHandler) applyLicenseFromSubscription(ctx context.Context, lic *model.License, event string, asOf *time.Time, cols ...string) (int, bool) {
+	previousQuantity, err := h.Store.UpdateLicenseFromSubscriptionWithPreviousQuantity(ctx, lic, asOf, cols...)
 	if errors.Is(err, store.ErrSubscriptionUnlinked) {
 		slog.Info("stripe webhook: license was unlinked from this subscription, event ignored",
 			"event", event, "license_id", lic.ID, "subscription_id", lic.StripeSubscriptionID)
-		return false
+		return 0, false
 	}
 	if errors.Is(err, store.ErrStaleSubscriptionRead) {
 		slog.Info("stripe webhook: a newer read of this subscription is already applied, event ignored",
 			"event", event, "license_id", lic.ID, "subscription_id", lic.StripeSubscriptionID)
-		return false
+		return 0, false
 	}
 	if errors.Is(err, store.ErrLicenseRestricted) {
 		slog.Info("stripe webhook: license is revoked, suspended by an operator or ended; event not applied",
 			"event", event, "license_id", lic.ID, "subscription_id", lic.StripeSubscriptionID)
-		return false
+		return 0, false
 	}
 	if err != nil {
 		slog.Error("stripe webhook: license write failed",
 			"event", event, "license_id", lic.ID, "error", err)
-		return false
+		return 0, false
 	}
-	return true
+	return previousQuantity, true
 }
 
 // endLicenseFromSubscription is applyLicenseFromSubscription for a
@@ -1635,7 +1696,7 @@ func (h *StripeHandler) onInvoicePaid(ctx context.Context, raw json.RawMessage) 
 		lic.PastDueAt = nil
 		lic.SuspendedAt, lic.SuspendedBy = nil, ""
 	}
-	if !h.applyLicenseFromSubscription(ctx, lic, "invoice.paid", nil, "valid_until", "status", "past_due_at", "suspended_at", "suspended_by") {
+	if _, applied := h.applyLicenseFromSubscription(ctx, lic, "invoice.paid", nil, "valid_until", "status", "past_due_at", "suspended_at", "suspended_by"); !applied {
 		return nil
 	}
 
@@ -1715,6 +1776,14 @@ func (h *StripeHandler) syncFromCurrent(ctx context.Context, lic *model.License,
 // suspension or revocation, or revives an ended subscription from a
 // payload.
 func (h *StripeHandler) applySubscriptionState(ctx context.Context, lic *model.License, data *subscriptionEvent, readAt *time.Time, event string) {
+	if lic.Plan == nil {
+		if plan, err := h.Store.FindPlanByID(ctx, lic.PlanID); err == nil {
+			lic.Plan = plan
+		} else {
+			slog.Error("stripe webhook: could not load license plan", "event", event, "license_id", lic.ID, "error", err)
+		}
+	}
+	quantityReported := false
 	// Capture the prior state BEFORE mutating — recovery side-effects
 	// (clearing past_due_at, firing the recovered email) only run when
 	// the transition is actually past_due → active.
@@ -1765,6 +1834,13 @@ func (h *StripeHandler) applySubscriptionState(ctx context.Context, lic *model.L
 		lic.SuspendedAt, lic.SuspendedBy = nil, ""
 		cols = append(cols, "suspended_at", "suspended_by")
 	}
+	if lic.Plan != nil && lic.Plan.PerSeat {
+		if item := subscriptionEventItemForPlan(data, lic.Plan); item != nil && item.Quantity >= 1 {
+			lic.Quantity = int(item.Quantity)
+			quantityReported = true
+			cols = append(cols, "quantity")
+		}
+	}
 
 	// Only move valid_until when the payload carries a period end;
 	// writing the zero value would expire the license on the spot. Not
@@ -1775,8 +1851,20 @@ func (h *StripeHandler) applySubscriptionState(ctx context.Context, lic *model.L
 		lic.ValidUntil = &until
 		cols = append(cols, "valid_until")
 	}
-	if !h.applyLicenseFromSubscription(ctx, lic, event, readAt, cols...) {
+	persistedOldQuantity, applied := h.applyLicenseFromSubscription(ctx, lic, event, readAt, cols...)
+	if !applied {
 		return
+	}
+	if quantityReported && persistedOldQuantity != lic.Quantity {
+		h.Store.Audit(ctx, &model.AuditLog{
+			Entity: "license", EntityID: lic.ID, Action: "quantity_changed", ActorType: "webhook",
+			Changes: map[string]any{"old": persistedOldQuantity, "new": lic.Quantity},
+		})
+		if h.WebhookSvc != nil {
+			h.WebhookSvc.Dispatch(ctx, lic.ProductID, model.EventLicenseQuantityChanged, map[string]any{
+				"license_id": lic.ID, "old_quantity": persistedOldQuantity, "new_quantity": lic.Quantity,
+			})
+		}
 	}
 
 	// Recovery notification fires only on past_due → active. Routed
@@ -1882,7 +1970,7 @@ func (h *StripeHandler) onPaymentFailed(ctx context.Context, raw json.RawMessage
 		now := time.Now()
 		lic.Status = model.StatusPastDue
 		lic.PastDueAt = &now
-		if !h.applyLicenseFromSubscription(ctx, lic, "invoice.payment_failed", nil, "status", "past_due_at") {
+		if _, applied := h.applyLicenseFromSubscription(ctx, lic, "invoice.payment_failed", nil, "status", "past_due_at"); !applied {
 			return
 		}
 	case model.StatusPastDue:
@@ -2062,6 +2150,7 @@ const (
 	// edited before the payment settles; the customer gets what was
 	// on offer when they paid, not what the plan says later.
 	metaUpdatesDays = "updates_days"
+	metaQuantity    = "quantity"
 	// metaLicenseType freezes what kind of licence the purchase is
 	// for. The period alone is not enough: a plan retyped to
 	// subscription or trial before the payment settles would have
@@ -2485,6 +2574,11 @@ func (h *StripeHandler) ChangePlan(c *gin.Context) {
 		response.Forbidden(c, "not your license")
 		return
 	}
+	if lic.Status == model.StatusSuspended || lic.Status == model.StatusRevoked || lic.Status == model.StatusCanceled {
+		response.Err(c, http.StatusConflict, "LICENSE_PLAN_CHANGE_UNAVAILABLE",
+			"plan cannot be changed while the license is "+lic.Status)
+		return
+	}
 
 	newPlan, err := h.Store.FindPlanByStripePrice(c, req.NewPriceID)
 	if err != nil || newPlan == nil {
@@ -2522,6 +2616,11 @@ func (h *StripeHandler) ChangePlan(c *gin.Context) {
 		return
 	}
 
+	stripeReadAt, err := h.Store.StripeReadStamp(c)
+	if err != nil {
+		response.Internal(c, err)
+		return
+	}
 	sub, err := subscription.Get(lic.StripeSubscriptionID, nil)
 	if err != nil {
 		response.Internal(c, err)
@@ -2534,20 +2633,41 @@ func (h *StripeHandler) ChangePlan(c *gin.Context) {
 		response.Internal(c, fmt.Errorf("stripe subscription %s has no items", lic.StripeSubscriptionID))
 		return
 	}
+	currentItem := sub.Items.Data[0]
+	if currentItem == nil {
+		response.Internal(c, fmt.Errorf("stripe subscription %s has an invalid item", lic.StripeSubscriptionID))
+		return
+	}
+	quantity := int64(1)
+	if currentItem != nil && currentItem.Quantity > 0 {
+		quantity = currentItem.Quantity
+	}
+	oldPerSeat := lic.Plan != nil && lic.Plan.PerSeat
+	updateQuantity := oldPerSeat || newPlan.PerSeat
+	switch {
+	case oldPerSeat && !newPlan.PerSeat:
+		quantity = 1
+	case !oldPerSeat && newPlan.PerSeat:
+		quantity = int64(newPlan.ClampQuantity(1))
+	case oldPerSeat && newPlan.PerSeat:
+		quantity = int64(newPlan.ClampQuantity(int(quantity)))
+	}
 
 	prorationBehavior := "create_prorations"
 	if req.Prorate != nil && !*req.Prorate {
 		prorationBehavior = "none"
 	}
 
+	itemParams := &stripe.SubscriptionItemsParams{
+		ID:    stripe.String(currentItem.ID),
+		Price: stripe.String(req.NewPriceID),
+	}
+	if updateQuantity {
+		itemParams.Quantity = stripe.Int64(quantity)
+	}
 	params := &stripe.SubscriptionParams{
 		ProrationBehavior: stripe.String(prorationBehavior),
-		Items: []*stripe.SubscriptionItemsParams{
-			{
-				ID:    stripe.String(sub.Items.Data[0].ID),
-				Price: stripe.String(req.NewPriceID),
-			},
-		},
+		Items:             []*stripe.SubscriptionItemsParams{itemParams},
 	}
 
 	updatedSub, err := subscription.Update(lic.StripeSubscriptionID, params)
@@ -2558,11 +2678,13 @@ func (h *StripeHandler) ChangePlan(c *gin.Context) {
 
 	oldPlanID := lic.PlanID
 	lic.PlanID = newPlan.ID
-	_ = h.Store.UpdateLicense(c, lic, "plan_id")
-
-	if subRecord, err := h.Store.FindSubscriptionByLicense(c, lic.ID); err == nil {
-		subRecord.PlanID = newPlan.ID
-		_ = h.Store.UpdateSubscription(c, subRecord, "plan_id")
+	if updateQuantity {
+		lic.Quantity = int(quantity)
+	}
+	oldQuantity, quantityWritten, err := h.Store.UpdateLicensePlanAndQuantity(c, lic, stripeReadAt, updateQuantity)
+	if err != nil {
+		response.Internal(c, err)
+		return
 	}
 	_ = updatedSub // used for audit context
 
@@ -2571,9 +2693,20 @@ func (h *StripeHandler) ChangePlan(c *gin.Context) {
 		ActorType: "user",
 		Changes: map[string]any{
 			"old_plan_id": oldPlanID, "new_plan_id": newPlan.ID,
-			"proration": prorationBehavior,
+			"proration": prorationBehavior, "old_quantity": oldQuantity, "new_quantity": lic.Quantity,
 		},
 	})
+	if quantityWritten && oldQuantity != lic.Quantity {
+		h.Store.Audit(c, &model.AuditLog{
+			Entity: "license", EntityID: lic.ID, Action: "quantity_changed", ActorType: "user",
+			Changes: map[string]any{"old": oldQuantity, "new": lic.Quantity},
+		})
+		if h.WebhookSvc != nil {
+			h.WebhookSvc.Dispatch(c, lic.ProductID, model.EventLicenseQuantityChanged, map[string]any{
+				"license_id": lic.ID, "old_quantity": oldQuantity, "new_quantity": lic.Quantity,
+			})
+		}
+	}
 	if h.WebhookSvc != nil {
 		h.WebhookSvc.Dispatch(c, lic.ProductID, "plan.changed", map[string]any{
 			"license_id": lic.ID, "old_plan_id": oldPlanID, "new_plan_id": newPlan.ID,
@@ -2873,7 +3006,7 @@ func (h *StripeHandler) onSubscriptionPaused(ctx context.Context, raw json.RawMe
 	now := time.Now()
 	lic.SuspendedAt = &now
 	lic.SuspendedBy = model.SuspendedByStripe // a resume lifts it; an operator's suspension it never replaces
-	if !h.applyLicenseFromSubscription(ctx, lic, "customer.subscription.paused", nil, "status", "suspended_at", "suspended_by") {
+	if _, applied := h.applyLicenseFromSubscription(ctx, lic, "customer.subscription.paused", nil, "status", "suspended_at", "suspended_by"); !applied {
 		return
 	}
 
@@ -2903,7 +3036,7 @@ func (h *StripeHandler) onSubscriptionResumed(ctx context.Context, raw json.RawM
 	lic.SuspendedAt, lic.SuspendedBy = nil, ""
 	// Lifts a Stripe pause only: the write refuses an operator's
 	// suspension and an ended subscription (store.ErrLicenseRestricted).
-	if !h.applyLicenseFromSubscription(ctx, lic, "customer.subscription.resumed", nil, "status", "suspended_at", "suspended_by") {
+	if _, applied := h.applyLicenseFromSubscription(ctx, lic, "customer.subscription.resumed", nil, "status", "suspended_at", "suspended_by"); !applied {
 		return
 	}
 
@@ -2997,21 +3130,55 @@ func (h *StripeHandler) resolvePlanFromLineItems(ctx context.Context, sessionID 
 	return h.planForPrice(ctx, item.Price.ID)
 }
 
-// resolvePlan maps a subscription to a plan through its first item's
-// price. nil,nil when the subscription has no items or the price is
-// not mapped; an error for Stripe or database failures.
-func (h *StripeHandler) resolvePlan(ctx context.Context, subID string) (*model.Plan, error) {
+// resolvePlan maps the subscription's first item to a plan and returns the
+// fetched subscription so fulfilment can also read its item quantity without
+// making another Stripe request. Unmapped subscriptions are returned too:
+// checkout metadata can still identify a plan whose item appears later.
+func (h *StripeHandler) resolvePlan(ctx context.Context, subID string) (*model.Plan, *stripe.Subscription, error) {
 	sub, err := subscription.Get(subID, nil)
 	if err != nil {
 		if stripeNotFound(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
-	if sub.Items == nil || len(sub.Items.Data) == 0 || sub.Items.Data[0].Price == nil {
-		return nil, nil
+	if sub.Items == nil || len(sub.Items.Data) == 0 {
+		return nil, sub, nil
 	}
-	return h.planForPrice(ctx, sub.Items.Data[0].Price.ID)
+	first := sub.Items.Data[0]
+	if first == nil || first.Price == nil || first.Price.ID == "" {
+		return nil, sub, nil
+	}
+	plan, err := h.planForPrice(ctx, first.Price.ID)
+	return plan, sub, err
+}
+
+func subscriptionItemForPlan(sub *stripe.Subscription, plan *model.Plan) *stripe.SubscriptionItem {
+	if sub == nil || sub.Items == nil || len(sub.Items.Data) == 0 {
+		return nil
+	}
+	if plan != nil && plan.StripePriceID != "" {
+		for _, item := range sub.Items.Data {
+			if item != nil && item.Price != nil && item.Price.ID == plan.StripePriceID {
+				return item
+			}
+		}
+	}
+	return sub.Items.Data[0]
+}
+
+func subscriptionEventItemForPlan(data *subscriptionEvent, plan *model.Plan) *subscriptionItemEvent {
+	if data == nil || len(data.Items.Data) == 0 {
+		return nil
+	}
+	if plan != nil && plan.StripePriceID != "" {
+		for i := range data.Items.Data {
+			if data.Items.Data[i].Price.ID == plan.StripePriceID {
+				return &data.Items.Data[i]
+			}
+		}
+	}
+	return &data.Items.Data[0]
 }
 
 // planForPrice distinguishes "no plan uses this price" from a

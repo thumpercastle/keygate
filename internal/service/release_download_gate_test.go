@@ -158,7 +158,9 @@ func TestFeedCutoff_MaintenancePeriod(t *testing.T) {
 	if err := s.CreatePlan(ctx, plan); err != nil {
 		t.Fatal(err)
 	}
-	cutoff := time.Now().Add(-10 * 24 * time.Hour)
+	// PostgreSQL stores timestamps with microsecond precision. Match that
+	// precision so the exact cutoff equality assertion below is stable.
+	cutoff := time.Now().Add(-10 * 24 * time.Hour).Truncate(time.Microsecond)
 	for _, v := range []struct {
 		version string
 		at      time.Time

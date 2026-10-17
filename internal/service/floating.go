@@ -53,7 +53,7 @@ func (s *FloatingService) CheckOut(ctx context.Context, in CheckOutInput) (*Chec
 	if timeout <= 0 {
 		timeout = 30
 	}
-	maxSessions := lic.Plan.MaxActivations
+	maxSessions := lic.EffectiveLimits().Activations.Value
 
 	expiresAt := time.Now().Add(time.Duration(timeout) * time.Minute)
 	sess := &model.FloatingSession{
@@ -105,12 +105,11 @@ func (s *FloatingService) Heartbeat(ctx context.Context, licenseKey, identifier,
 	}
 
 	timeout := 30
-	maxSessions := 3
+	maxSessions := lic.EffectiveLimits().Activations.Value
 	if lic.Plan != nil {
 		if lic.Plan.FloatingTimeout > 0 {
 			timeout = lic.Plan.FloatingTimeout
 		}
-		maxSessions = lic.Plan.MaxActivations
 	}
 
 	newExpiry := time.Now().Add(time.Duration(timeout) * time.Minute)

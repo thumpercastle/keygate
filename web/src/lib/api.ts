@@ -308,7 +308,9 @@ export const admin = {
     external_customer_id?: string
     external_workspace_id?: string
     valid_until?: string
+    quantity?: number
   }) => post<License>("/admin/licenses", data),
+  setLicenseQuantity: (id: string, quantity: number) => post<License>(`/admin/licenses/${id}/quantity`, { quantity }),
   // Empty valid_until clears the expiry (perpetual license).
   setLicenseValidUntil: (id: string, validUntil: string) =>
     post<License>(`/admin/licenses/${id}/valid-until`, { valid_until: validUntil }),
@@ -622,6 +624,9 @@ export interface Plan {
   floating_timeout?: number
   token_ttl_days?: number
   max_seats: number
+  per_seat: boolean
+  min_quantity: number
+  max_quantity: number
   trial_days: number
   grace_days: number
   stripe_price_id?: string
@@ -662,6 +667,9 @@ export interface License {
   // purchase has no subscription, so nothing to change, cancel, or
   // update a payment method for.
   stripe_subscription_id?: string
+  quantity: number
+  effective_max_activations: number
+  effective_max_seats: number
   status: string
   valid_from: string
   valid_until?: string

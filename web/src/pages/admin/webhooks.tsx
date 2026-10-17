@@ -78,6 +78,7 @@ const WEBHOOK_EVENTS = [
   "seat.added",
   "seat.removed",
   "plan.changed",
+  "license.quantity_changed",
 ]
 
 export default function WebhooksPage() {

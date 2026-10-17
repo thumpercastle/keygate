@@ -268,7 +268,7 @@ export default function LicensesPage() {
                               lic.plan?.license_model === "floating"
                                 ? (lic.active_session_count ?? 0)
                                 : (lic.activation_count ?? 0)
-                            } / ${lic.plan?.max_activations || "-"}`}
+                            } / ${lic.effective_max_activations || "-"}`}
                       </DataTableCell>
                       <DataTableCell>
                         <Badge className={statusColor(lic.status)}>
@@ -495,6 +495,15 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const [changingPlan, setChangingPlan] = useState(false)
   // null = not editing; "" = editing with empty value (perpetual)
   const [editingValidUntil, setEditingValidUntil] = useState<string | null>(null)
+  const [editingQuantity, setEditingQuantity] = useState<number | null>(null)
+  const quantityMut = useMutation({
+    mutationFn: (quantity: number) => admin.setLicenseQuantity(id, quantity),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin"] })
+      setEditingQuantity(null)
+    },
+    onError: (e: Error) => showToast(e.message, "error"),
+  })
 
   const revokeMut = useMutation({
     mutationFn: () => admin.revokeLicense(id),
@@ -659,6 +668,59 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                   <div>
                     <p className="text-muted-foreground">{t("common.plan")}</p>
                     <p className="mt-1 font-medium">{lic.plan?.name || "-"}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">{t("licenses.quantity")}</p>
+                    {editingQuantity === null ? (
+                      <div className="mt-1 flex items-center gap-1">
+                        <p>{lic.quantity}</p>
+                        {lic.plan?.per_seat && !lic.stripe_subscription_id && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6"
+                            title={t("licenses.editQuantity")}
+                            onClick={() => setEditingQuantity(lic.quantity)}
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </Button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="mt-1 flex items-center gap-1">
+                        <Input
+                          type="number"
+                          min={lic.plan?.min_quantity ?? 1}
+                          max={lic.plan?.max_quantity ?? 10000}
+                          className="h-7 w-24 text-xs"
+                          value={editingQuantity}
+                          onChange={(e) => setEditingQuantity(Number(e.target.value))}
+                        />
+                        <Button
+                          size="sm"
+                          className="h-7"
+                          disabled={quantityMut.isPending}
+                          onClick={() => quantityMut.mutate(editingQuantity)}
+                        >
+                          {t("common.save")}
+                        </Button>
+                        <Button variant="ghost" size="sm" className="h-7" onClick={() => setEditingQuantity(null)}>
+                          {t("common.cancel")}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">{t("licenses.effectiveMaxActivations")}</p>
+                    <p className="mt-1">
+                      {lic.effective_max_activations === 0 ? t("common.unlimited") : lic.effective_max_activations}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">{t("licenses.effectiveMaxSeats")}</p>
+                    <p className="mt-1">
+                      {lic.effective_max_seats === 0 ? t("common.unlimited") : lic.effective_max_seats}
+                    </p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">{t("licenses.validFrom")}</p>
@@ -976,8 +1038,8 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                     <Separator />
                     <div>
                       <h3 className="font-semibold mb-3">
-                        {t("licenses.activations")} ({lic.activations?.length || 0} / {lic.plan?.max_activations || "-"}
-                        )
+                        {t("licenses.activations")} ({lic.activations?.length || 0} /{" "}
+                        {lic.effective_max_activations || "-"})
                       </h3>
                       {lic.activations && lic.activations.length > 0 ? (
                         <DataTable>
@@ -1054,7 +1116,11 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
             </TabsContent>
 
             <TabsContent value="seats" className="-mr-6 min-h-0 flex-1 overflow-y-auto pr-6">
-              <SeatsTab licenseId={id} maxSeats={lic?.plan?.max_seats || 0} />
+              <SeatsTab
+                licenseId={id}
+                maxSeats={lic?.effective_max_seats || 0}
+                perSeat={lic?.plan?.per_seat ?? false}
+              />
             </TabsContent>
           </Tabs>
         )}
@@ -1254,7 +1320,7 @@ function UsageTab({ licenseId }: { licenseId: string }) {
 // support / debugging ("how many seats has ACME used?"). Inviting
 // someone onto a customer's license from this view would let an
 // operator change a team's composition without consent.
-function SeatsTab({ licenseId, maxSeats }: { licenseId: string; maxSeats: number }) {
+function SeatsTab({ licenseId, maxSeats, perSeat }: { licenseId: string; maxSeats: number; perSeat: boolean }) {
   const { t } = useI18n()
   const pg = useServerPagination(20)
   const { data, isLoading } = useQuery({
@@ -1264,13 +1330,14 @@ function SeatsTab({ licenseId, maxSeats }: { licenseId: string; maxSeats: number
 
   const { items: seats, total, totalPages } = pg.from(data, data?.seats)
   const activeCount = data?.active_count ?? 0
+  const displayedCount = activeCount + (perSeat ? 1 : 0)
 
   if (isLoading) return <div className="h-32 animate-pulse bg-muted rounded-lg" />
 
   return (
     <div className="space-y-4 pt-2">
       <h3 className="font-semibold">
-        {t("licenses.seats")} ({activeCount}
+        {t("licenses.seats")} ({displayedCount}
         {maxSeats > 0 ? ` / ${maxSeats}` : ""} {t("licenses.active")})
       </h3>
       {seats.length === 0 ? (

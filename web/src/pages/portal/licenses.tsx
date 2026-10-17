@@ -100,8 +100,12 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   // Backend treats max_seats=0 as "no limit", so the only case we hide
   // is max_seats=1 (true single-seat). Perpetual products don't have
   // a portal-managed team, so gate on product type too.
-  const seatCap = lic.plan?.max_seats ?? 0
-  const showSeats = (productType === "saas" || productType === "hybrid") && seatCap !== 1
+  const seatCap = lic.effective_max_seats ?? lic.plan?.max_seats ?? 0
+  const perSeat = lic.plan?.per_seat === true
+  const hasSeatCapability = productType === "saas" || productType === "hybrid"
+  const embeddedActiveSeats = lic.seats?.filter((seat) => !seat.removed_at).length ?? 0
+  const showSeats =
+    hasSeatCapability && (perSeat ? seatCap === 0 || seatCap > 1 || embeddedActiveSeats > 0 : seatCap !== 1)
 
   const copyKey = () => {
     navigator.clipboard.writeText(lic.license_key)
@@ -187,10 +191,15 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
           <div>
             <p className="text-muted-foreground">{t("licenses.activations")}</p>
             <p className="font-medium">
-              {lic.activations?.length || 0} / {lic.plan?.max_activations || "-"}
+              {lic.activations?.length || 0} /{" "}
+              {perSeat
+                ? lic.effective_max_activations === 0
+                  ? t("common.unlimitedSymbol")
+                  : lic.effective_max_activations
+                : lic.plan?.max_activations || "-"}
             </p>
           </div>
-          {showSeats && (
+          {hasSeatCapability && (perSeat || showSeats) && (
             <div>
               <p className="text-muted-foreground">{t("licenses.seats")}</p>
               <p className="font-medium">{seatCap === 0 ? t("common.unlimited") : seatCap}</p>
@@ -230,6 +239,11 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
             {hasSubscription && (
               <Button variant="outline" size="sm" onClick={handleBillingPortal}>
                 {t("portal.updatePayment")}
+              </Button>
+            )}
+            {hasSubscription && perSeat && (
+              <Button variant="link" size="sm" className="px-1" onClick={handleBillingPortal}>
+                {t("portal.changeSeats")}
               </Button>
             )}
             {hasSubscription && (lic.status === "active" || lic.status === "trialing") && (
@@ -352,12 +366,15 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
   const useReadOnly = !authorized || actQuery.isError
   if (useReadOnly) {
     const embedded = license.activations || []
+    const effectiveMax = license.effective_max_activations ?? license.plan?.max_activations ?? 0
+    const overLimit = license.plan?.per_seat === true && effectiveMax > 0 && embedded.length > effectiveMax
     return (
       <div className="space-y-3">
         <p className="text-sm font-medium">
           {t("portal.activeDevices")} ({embedded.length}
-          {license.plan?.max_activations ? `/${license.plan.max_activations}` : ""})
+          {effectiveMax > 0 ? `/${effectiveMax}` : ""})
         </p>
+        {overLimit && <p className="text-xs text-amber-700 dark:text-amber-400">{t("portal.activationsOverLimit")}</p>}
         {embedded.length === 0 ? (
           <p className="text-sm text-muted-foreground py-4 text-center">{t("portal.noDevices")}</p>
         ) : (
@@ -383,7 +400,8 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
   }
 
   const activations = actQuery.data?.activations || []
-  const max = actQuery.data?.max ?? 0
+  const max = license.effective_max_activations ?? actQuery.data?.max ?? 0
+  const overLimit = license.plan?.per_seat === true && max > 0 && activations.length > max
 
   return (
     <div className="space-y-3">
@@ -393,6 +411,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
           {max > 0 ? `/${max}` : ""})
         </p>
       </div>
+      {overLimit && <p className="text-xs text-amber-700 dark:text-amber-400">{t("portal.activationsOverLimit")}</p>}
 
       {actQuery.isLoading ? (
         <div className="h-16 animate-pulse bg-muted rounded-lg" />
@@ -512,8 +531,12 @@ function SeatsSection({ license }: { license: PortalLicense }) {
   const activeCount = seats.filter((s) => !s.removed_at).length
   // maxSeats=0 means "no limit" per backend (internal/store/seats.go:81);
   // never gate the Add button in that case.
-  const maxSeats = license.plan?.max_seats ?? 0
-  const atLimit = maxSeats > 0 && activeCount >= maxSeats
+  const perSeat = license.plan?.per_seat === true
+  const maxSeats = license.effective_max_seats ?? license.plan?.max_seats ?? 0
+  const invitationCap = perSeat && maxSeats > 0 ? Math.max(0, maxSeats - 1) : maxSeats
+  const memberCount = activeCount + (perSeat ? 1 : 0)
+  const atLimit = invitationCap > 0 ? activeCount >= invitationCap : perSeat && maxSeats > 0
+  const overLimit = perSeat && maxSeats > 0 && activeCount > invitationCap
 
   // canManage mirrors backend portalSeatMutationGuard: the license
   // owner (matched by email, case-insensitive) OR an accepted seat
@@ -530,7 +553,7 @@ function SeatsSection({ license }: { license: PortalLicense }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium">
-          {t("portal.teamMembers")} ({activeCount}/{maxSeats === 0 ? t("common.unlimitedSymbol") : maxSeats})
+          {t("portal.teamMembers")} ({memberCount}/{maxSeats === 0 ? t("common.unlimitedSymbol") : maxSeats})
         </p>
         {canManage && (
           <Button size="sm" disabled={atLimit} onClick={() => setShowInvite(true)}>
@@ -539,7 +562,11 @@ function SeatsSection({ license }: { license: PortalLicense }) {
         )}
       </div>
 
-      {canManage && atLimit && <p className="text-xs text-muted-foreground">{t("portal.seatLimit")}</p>}
+      {overLimit ? (
+        <p className="text-xs text-amber-700 dark:text-amber-400">{t("portal.seatsOverLimit")}</p>
+      ) : canManage && atLimit ? (
+        <p className="text-xs text-muted-foreground">{t("portal.seatLimit")}</p>
+      ) : null}
 
       {seatsQuery.isLoading ? (
         <div className="h-16 animate-pulse bg-muted rounded-lg" />
