@@ -239,13 +239,22 @@ func (s *SeatService) RemoveSeat(ctx context.Context, licenseKey, seatID, produc
 		return apperr.NotFound("SEAT", seatID)
 	}
 
-	if err := s.store.RemoveSeat(ctx, seatID); err != nil {
+	// Removing a seat signs its devices out in the same transaction:
+	// a seat-bound device's next check-in then fails, so the person
+	// who lost the seat stops working within one check-in interval.
+	removed, err := s.store.RemoveSeatAndDevices(ctx, seatID)
+	if err != nil {
 		return apperr.Internal(err)
 	}
 
 	s.webhook.Dispatch(ctx, lic.ProductID, model.EventSeatRemoved, map[string]any{
 		"license_id": lic.ID, "seat_id": seatID, "email": seat.Email,
 	})
+	for _, a := range removed {
+		s.webhook.Dispatch(ctx, lic.ProductID, "license.deactivated", map[string]any{
+			"license_id": lic.ID, "identifier": a.Identifier, "reason": "seat_removed",
+		})
+	}
 	s.store.Audit(ctx, &model.AuditLog{
 		Entity: "seat", EntityID: seatID, Action: "seat_removed",
 		ActorType: "portal_user", ActorID: actorUserID,

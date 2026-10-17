@@ -35,6 +35,16 @@ type LicenseService struct {
 	logger     *slog.Logger
 	failures   FailureTracker
 	webhook    *WebhookService
+	// clock stamps signed tokens; nil means time.Now. Tests that move
+	// time set it so a token agrees with the clock that decided it.
+	clock func() time.Time
+}
+
+func (s *LicenseService) timeNow() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
 }
 
 func NewLicenseService(s *store.Store, signingKey licenseSigningKey, logger *slog.Logger, failures FailureTracker, webhook *WebhookService) *LicenseService {
@@ -111,7 +121,22 @@ func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*Activ
 		return nil, err
 	}
 
+	// A plan that requires seat sign-in takes no new key activations:
+	// the key would otherwise let anyone holding it skip the seat
+	// check. Said plainly — this caller already holds a real key.
+	if lic.Plan != nil && lic.Plan.RequireSeatSignin {
+		return nil, apperr.New(403, "SEAT_SIGNIN_REQUIRED",
+			"this license is activated by signing in with a seat email, not with the key")
+	}
+
 	if existing, err := s.store.FindActivation(ctx, lic.ID, in.Identifier); err == nil {
+		// A seat-bound activation is only renewed through seat
+		// verify, which checks the device secret, fingerprint and
+		// sign-in age. Handing out a token here would skip all three.
+		if existing.SeatBound() {
+			return nil, apperr.Conflict("SEAT_BOUND_DEVICE",
+				"this device is signed in with a seat; it cannot also be activated with the key")
+		}
 		_ = s.store.TouchActivation(ctx, existing.ID)
 		middleware.LicenseActivations.WithLabelValues(lic.ProductID, "already_activated").Inc()
 		token, _, err := s.signToken(ctx, lic, in.Identifier)
@@ -137,6 +162,10 @@ func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*Activ
 		// answer that read would have given: a repeat activation is
 		// the licence working, not a failure.
 		if errors.Is(err, store.ErrAlreadyActivated) {
+			if held, ferr := s.store.FindActivation(ctx, lic.ID, in.Identifier); ferr == nil && held.SeatBound() {
+				return nil, apperr.Conflict("SEAT_BOUND_DEVICE",
+					"this device is signed in with a seat; it cannot also be activated with the key")
+			}
 			_ = s.store.TouchActivation(ctx, act.ID)
 			middleware.LicenseActivations.WithLabelValues(lic.ProductID, "already_activated").Inc()
 			token, _, terr := s.signToken(ctx, lic, in.Identifier)
@@ -297,6 +326,12 @@ func (s *LicenseService) Verify(ctx context.Context, in VerifyInput) (*VerifyRes
 	}
 
 	act, err := s.store.FindActivation(ctx, lic.ID, in.Identifier)
+	// A seat-bound activation is verified with its device secret
+	// (seat verify), never with the key; and once a plan requires seat
+	// sign-in, the key's remaining activations stop verifying too.
+	if err == nil && (act.SeatBound() || (lic.Plan != nil && lic.Plan.RequireSeatSignin)) {
+		err = sql.ErrNoRows
+	}
 	if err != nil {
 		middleware.LicenseVerifications.WithLabelValues(lic.ProductID, "not_activated").Inc()
 		// Not yet activated for this device → looks identical to "no
@@ -376,6 +411,11 @@ func (s *LicenseService) Deactivate(ctx context.Context, in DeactivateInput) err
 	}
 
 	act, err := s.store.FindActivation(ctx, lic.ID, in.Identifier)
+	// The key cannot sign a seat holder's device out; that takes the
+	// device secret (seat deactivate) or the portal.
+	if err == nil && act.SeatBound() {
+		err = sql.ErrNoRows
+	}
 	if err != nil {
 		// Same 404 LICENSE_NOT_FOUND as "license missing" so deactivate
 		// can't be used to probe for real keys ("oh, this key returned
@@ -567,10 +607,23 @@ func (s *LicenseService) tokenTTLFor(lic *model.License) time.Duration {
 	return tokenTTL
 }
 
+// seatClaims are the extra claims a seat-bound token carries.
+type seatClaims struct {
+	Email  string
+	SeatID string
+	// ReauthAt, when set, caps the token's exp: the device must sign
+	// in again by then, online or not.
+	ReauthAt *time.Time
+}
+
 // signToken also returns the feature map it signed, so a verify answer
 // reports exactly the features its token carries.
 func (s *LicenseService) signToken(ctx context.Context, lic *model.License, identifier string) (string, map[string]any, error) {
-	now := time.Now()
+	return s.signTokenWith(ctx, lic, identifier, nil)
+}
+
+func (s *LicenseService) signTokenWith(ctx context.Context, lic *model.License, identifier string, seat *seatClaims) (string, map[string]any, error) {
+	now := s.timeNow()
 
 	ents, err := licenseFeatures(ctx, s.store, lic)
 	if err != nil {
@@ -604,6 +657,18 @@ func (s *LicenseService) signToken(ctx context.Context, lic *model.License, iden
 		updatesUntil = u.Unix()
 	}
 
+	var email, seatID string
+	var reauthAt int64
+	if seat != nil {
+		email, seatID = seat.Email, seat.SeatID
+		if seat.ReauthAt != nil {
+			reauthAt = seat.ReauthAt.Unix()
+			if seat.ReauthAt.Before(expiresAt) {
+				expiresAt = *seat.ReauthAt
+			}
+		}
+	}
+
 	t := &license.VerifyToken{
 		LicenseID:    lic.ID,
 		ProductID:    lic.ProductID,
@@ -617,6 +682,9 @@ func (s *LicenseService) signToken(ctx context.Context, lic *model.License, iden
 		UpdatesUntil: updatesUntil,
 		GraceDays:    grace,
 		Fingerprint:  license.Fingerprint(identifier, lic.ProductID),
+		Email:        email,
+		SeatID:       seatID,
+		ReauthAt:     reauthAt,
 	}
 	token, err := license.Sign(t, s.signingKey)
 	return token, features, err

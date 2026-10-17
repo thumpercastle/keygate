@@ -22,6 +22,7 @@ import ReleasesPage from "@/pages/admin/releases"
 import SettingsPage from "@/pages/admin/settings"
 import WebhooksPage from "@/pages/admin/webhooks"
 import CheckoutSuccessPage from "@/pages/checkout-success"
+import DesktopSigninPage from "@/pages/desktop-signin"
 import LoginPage from "@/pages/login"
 import PortalAccountPage from "@/pages/portal/account"
 import PortalLicensesPage from "@/pages/portal/licenses"
@@ -54,6 +55,7 @@ createRoot(document.getElementById("root")!).render(
                     <Route path="/login" element={<LoginPage />} />
                     <Route path="/checkout/success" element={<CheckoutSuccessPage />} />
                     <Route path="/accept-invite" element={<AcceptInvitePage />} />
+                    <Route path="/desktop-signin" element={<DesktopSigninPage />} />
 
                     {/* Admin */}
                     <Route path="/admin" element={<AdminLayout />}>

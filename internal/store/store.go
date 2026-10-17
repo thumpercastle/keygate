@@ -935,7 +935,8 @@ func updateLicenseAndSubscriptionIn(ctx context.Context, tx bun.Tx, lic *model.L
 
 func (s *Store) ListLicensesByEmail(ctx context.Context, email string) ([]*model.License, error) {
 	var out []*model.License
-	// Include licenses owned by email OR where user has a seat. Matched
+	// Include licenses owned by email OR where user has an accepted
+	// seat (a pending invitation shows nothing until claimed). Matched
 	// case-insensitively: a licence keeps the address as it was typed,
 	// and the portal session carries the lower-cased sign-in address.
 	e := normalizeEmail(email)
@@ -948,7 +949,8 @@ func (s *Store) ListLicensesByEmail(ctx context.Context, email string) ([]*model
 		Where(`license.id IN (
 			SELECT id FROM licenses WHERE lower(email) = ?
 			UNION ALL
-			SELECT license_id FROM seats WHERE lower(email) = ? AND removed_at IS NULL)`, e, e).
+			SELECT license_id FROM seats WHERE lower(email) = ? AND removed_at IS NULL
+				AND accepted_at IS NOT NULL)`, e, e).
 		OrderExpr("license.created_at DESC, license.id DESC").Scan(ctx)
 	if err != nil {
 		return nil, err

@@ -60,6 +60,39 @@ type portalLicense struct {
 	LicenseKey string `json:"license_key"`
 }
 
+// portalLicenseFor shapes a licence for the portal user with address
+// email. The key is a credential: only the owner and accepted seat
+// admins (the people who manage seats and devices) get it. A member
+// sees the licence and their own devices, not the key and not their
+// colleagues' machines — with seat sign-in, a member never needs the
+// key, and handing it out is how a licence gets shared.
+func portalLicenseFor(l *model.License, email, key string) portalLicense {
+	e := strings.ToLower(strings.TrimSpace(email))
+	if strings.EqualFold(l.Email, e) || seatAdmin(l, e) {
+		return portalLicense{License: l, LicenseKey: key}
+	}
+	mine := make([]*model.Activation, 0, len(l.Activations))
+	for _, a := range l.Activations {
+		if a.SeatEmail == e {
+			mine = append(mine, a)
+		}
+	}
+	l.Activations = mine
+	l.ActivationCount = len(mine)
+	return portalLicense{License: l}
+}
+
+// seatAdmin reports whether email holds an accepted admin seat on l,
+// from the seats loaded with it.
+func seatAdmin(l *model.License, email string) bool {
+	for _, st := range l.Seats {
+		if st.RemovedAt == nil && st.AcceptedAt != nil && st.Role == "admin" && strings.EqualFold(st.Email, email) {
+			return true
+		}
+	}
+	return false
+}
+
 func portalPlanView(p *model.Plan) gin.H {
 	return gin.H{
 		"id": p.ID, "name": p.Name, "slug": p.Slug,
@@ -307,6 +340,7 @@ func main() {
 	licenseSvc := service.NewLicenseService(db, licenseSigningPriv, logger, bf, webhookSvc)
 	usageSvc := service.NewUsageService(db, webhookSvc, emailSvc, logger, cfg.QuotaWarningThreshold)
 	seatSvc := service.NewSeatService(db, webhookSvc, emailSvc, logger, cfg.BaseURL)
+	seatDeviceSvc := service.NewSeatDeviceService(db, licenseSvc, emailSvc, webhookSvc, bf, logger, cfg.BaseURL)
 	entitlementSvc := service.NewEntitlementService(db, logger)
 	floatingSvc := service.NewFloatingService(db, logger)
 
@@ -482,6 +516,7 @@ func main() {
 	}
 	usageH := handler.NewUsageHandler(usageSvc)
 	seatH := handler.NewSeatHandler(seatSvc)
+	seatDeviceH := handler.NewSeatDeviceHandler(seatDeviceSvc)
 	entitlementH := handler.NewEntitlementHandler(entitlementSvc)
 	floatingH := handler.NewFloatingHandler(floatingSvc)
 	webhookAdminH := handler.NewWebhookAdminHandler(db, webhookSvc)
@@ -552,6 +587,7 @@ func main() {
 				return
 			case <-ticker.C:
 				db.CleanExpiredOTPs(context.Background())
+				db.CleanExpiredDesktopSignins(context.Background())
 				db.CleanExpiredRefreshTokens(context.Background())
 				_, _ = db.IdempotencyPruneExpired(context.Background())
 			}
@@ -796,6 +832,35 @@ func main() {
 		lic.POST("/download", releasePublicH.Download)
 	}
 
+	// Seat-bound desktop sign-in. The app never holds the licence key:
+	// a person signs a device in by approving an emailed link, and the
+	// device then checks in with a rotating device secret. Each step
+	// has its own per-IP bucket — a poll every few seconds must not eat
+	// the budget for starting sign-ins, and neither may starve verify.
+	seatGroup := v1.Group("/license/seat")
+	{
+		seatGroup.POST("/signin/start",
+			middleware.RateLimitByIPScoped("seat_signin_start", cfg.RateLimitOTPSend, time.Hour),
+			seatDeviceH.Start)
+		seatGroup.POST("/signin/poll",
+			middleware.RateLimitByIPScoped("seat_signin_poll", 600, time.Minute),
+			seatDeviceH.Poll)
+		seatGroup.POST("/signin/describe",
+			middleware.RateLimitByIPScoped("seat_signin_page", 60, time.Minute),
+			seatDeviceH.Describe)
+		seatGroup.POST("/signin/approve",
+			middleware.RateLimitByIPScoped("seat_signin_page", 60, time.Minute),
+			seatDeviceH.Approve)
+		seatGroup.POST("/verify",
+			middleware.LicenseBruteForceGuard(bf),
+			middleware.RateLimitByIPScoped("seat_verify", licRateLimit, time.Minute),
+			seatDeviceH.Verify)
+		seatGroup.POST("/deactivate",
+			middleware.LicenseBruteForceGuard(bf),
+			middleware.RateLimitByIPScoped("seat_verify", licRateLimit, time.Minute),
+			seatDeviceH.Deactivate)
+	}
+
 	// Public invite acceptance — the token is proof of email
 	// ownership (we mailed it to the invitee), so no session auth
 	// is required, but we DO want rate limiting against token
@@ -899,13 +964,12 @@ func main() {
 				return
 			}
 			// model.License hides the key so it can't leak from admin
-			// payloads by accident. Here it is the customer's own
-			// credential and the portal genuinely needs it — it is
-			// both displayed and used to address the activation and
-			// seat endpoints — so re-attach it explicitly.
+			// payloads by accident. The owner and seat admins need it —
+			// it is displayed and addresses the activation and seat
+			// endpoints — so it is re-attached for them only.
 			out := make([]portalLicense, 0, len(licenses))
 			for _, l := range licenses {
-				out = append(out, portalLicense{License: l, LicenseKey: db.DecryptLicenseKey(l)})
+				out = append(out, portalLicenseFor(l, emailStr, db.DecryptLicenseKey(l)))
 			}
 			// The portal hides the renewal button while the switch is
 			// off; the endpoint refuses the sale regardless.
@@ -1040,7 +1104,9 @@ func main() {
 				// a license-existence oracle. License keys are 32-
 				// byte random so the keyspace defeats enumeration in
 				// practice, but the oracle is gratuitous.
-				if _, err := db.FindSeatByEmail(c, lic.ID, emailStr); err != nil {
+				// Only an ACCEPTED seat counts: a pending invitation
+				// confers nothing until it is claimed.
+				if seat, err := db.FindSeatByEmail(c, lic.ID, emailStr); err != nil || seat.AcceptedAt == nil {
 					response.NotFound(c, "license not found")
 					c.Abort()
 					return
@@ -1109,6 +1175,63 @@ func main() {
 		portal.POST("/seats", portalLicenseGuard, seatH.ListSeats)
 		portal.POST("/seats/add", portalSeatMutationGuard, seatH.AddSeat)
 		portal.POST("/seats/remove", portalSeatMutationGuard, seatH.RemoveSeat)
+		// The owner chooses whether they occupy a seat themselves.
+		// Releasing it frees the seat for an invitee and signs the
+		// owner's own devices out.
+		portal.POST("/licenses/owner-seat", func(c *gin.Context) {
+			var req struct {
+				LicenseID string `json:"license_id" binding:"required"`
+				Released  *bool  `json:"released" binding:"required"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				response.BadRequest(c, "license_id and released are required")
+				return
+			}
+			emailVal, _ := c.Get("email")
+			emailStr, _ := emailVal.(string)
+			lic, err := db.FindLicenseByID(c, req.LicenseID)
+			if err != nil || emailStr == "" || !strings.EqualFold(lic.Email, emailStr) {
+				response.NotFound(c, "license not found")
+				return
+			}
+			if !*req.Released && !lic.OwnerSeatReleased {
+				response.OK(c, gin.H{"owner_seat_released": false})
+				return
+			}
+			if !*req.Released {
+				// Taking the seat back needs a free one.
+				lic.OwnerSeatReleased = false
+				limits := lic.EffectiveLimits()
+				if !limits.Invitations.Unlimited {
+					n, err := db.CountActiveSeats(c, lic.ID)
+					if err != nil {
+						response.Internal(c, err)
+						return
+					}
+					if n > limits.Invitations.Value {
+						response.Err(c, http.StatusConflict, "SEAT_LIMIT",
+							"every seat is assigned; remove one before taking a seat yourself")
+						return
+					}
+				}
+			}
+			removed, err := db.SetOwnerSeatReleased(c, lic, *req.Released)
+			if err != nil {
+				response.Internal(c, err)
+				return
+			}
+			for _, a := range removed {
+				webhookSvc.Dispatch(c, lic.ProductID, "license.deactivated", map[string]any{
+					"license_id": lic.ID, "identifier": a.Identifier, "reason": "owner_seat_released",
+				})
+			}
+			db.Audit(c, &model.AuditLog{
+				Entity: "license", EntityID: lic.ID, Action: "owner_seat_changed",
+				ActorType: "portal_user", ActorID: emailStr, IPAddress: c.ClientIP(),
+				Changes: map[string]any{"owner_seat_released": *req.Released, "devices_signed_out": len(removed)},
+			})
+			response.OK(c, gin.H{"owner_seat_released": *req.Released})
+		})
 
 		// Self-service activation management — solves the "I lost my
 		// laptop, my activation slot is stuck" support ticket.

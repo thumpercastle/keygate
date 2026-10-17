@@ -104,8 +104,12 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   const perSeat = lic.plan?.per_seat === true
   const hasSeatCapability = productType === "saas" || productType === "hybrid"
   const embeddedActiveSeats = lic.seats?.filter((seat) => !seat.removed_at).length ?? 0
+  // Seat management needs the key (it names the licence on the seat
+  // endpoints), which only the owner and seat admins receive.
   const showSeats =
-    hasSeatCapability && (perSeat ? seatCap === 0 || seatCap > 1 || embeddedActiveSeats > 0 : seatCap !== 1)
+    !!lic.license_key &&
+    hasSeatCapability &&
+    (perSeat ? seatCap === 0 || seatCap > 1 || embeddedActiveSeats > 0 : seatCap !== 1)
 
   const copyKey = () => {
     navigator.clipboard.writeText(lic.license_key)
@@ -169,14 +173,18 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* License key */}
-        <div className="flex items-center gap-2 bg-muted rounded-lg px-3 py-2">
-          <Key className="h-4 w-4 text-muted-foreground shrink-0" />
-          <code className="text-sm flex-1 truncate">{lic.license_key}</code>
-          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={copyKey}>
-            {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
-          </Button>
-        </div>
+        {/* License key — owner and seat admins only; members sign in with their email */}
+        {lic.license_key ? (
+          <div className="flex items-center gap-2 bg-muted rounded-lg px-3 py-2">
+            <Key className="h-4 w-4 text-muted-foreground shrink-0" />
+            <code className="text-sm flex-1 truncate">{lic.license_key}</code>
+            <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={copyKey}>
+              {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">{t("portal.keyManagersOnly")}</p>
+        )}
 
         {/* Overview stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
@@ -192,11 +200,13 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
             <p className="text-muted-foreground">{t("licenses.activations")}</p>
             <p className="font-medium">
               {lic.activations?.length || 0} /{" "}
-              {perSeat
-                ? lic.effective_max_activations === 0
-                  ? t("common.unlimitedSymbol")
-                  : lic.effective_max_activations
-                : lic.plan?.max_activations || "-"}
+              {!lic.license_key
+                ? (lic.plan?.max_devices_per_seat ?? 1)
+                : perSeat
+                  ? lic.effective_max_activations === 0
+                    ? t("common.unlimitedSymbol")
+                    : lic.effective_max_activations
+                  : lic.plan?.max_activations || "-"}
             </p>
           </div>
           {hasSeatCapability && (perSeat || showSeats) && (
@@ -328,7 +338,11 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
   const isOwner = !!myEmail && license.email?.toLowerCase() === myEmail
   const mySeat = (license.seats || []).find((s) => s.email.toLowerCase() === myEmail && !s.removed_at)
   const isAcceptedSeat = !!mySeat?.accepted_at
-  const authorized = isOwner || isAcceptedSeat
+  // Managing devices goes through the key-addressed endpoint, so only
+  // callers who were given the key (owner, seat admins) take that path;
+  // a member reads the embedded list, which the server has already
+  // narrowed to their own devices.
+  const authorized = (isOwner || isAcceptedSeat) && !!license.license_key
 
   const actQuery = useQuery({
     queryKey: ["portal", "activations", license.id],
@@ -366,7 +380,10 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
   const useReadOnly = !authorized || actQuery.isError
   if (useReadOnly) {
     const embedded = license.activations || []
-    const effectiveMax = license.effective_max_activations ?? license.plan?.max_activations ?? 0
+    // A member (no key) is limited per seat, not by the licence's pool.
+    const effectiveMax = !license.license_key
+      ? (license.plan?.max_devices_per_seat ?? 1)
+      : (license.effective_max_activations ?? license.plan?.max_activations ?? 0)
     const overLimit = license.plan?.per_seat === true && effectiveMax > 0 && embedded.length > effectiveMax
     return (
       <div className="space-y-3">
@@ -388,6 +405,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
                     <span className="text-xs text-muted-foreground capitalize">{act.identifier_type}</span>
                   </div>
                   <p className="text-xs text-muted-foreground mt-0.5">
+                    {act.seat_email && <>{t("portal.signedInAs", { email: act.seat_email })} · </>}
                     {t("portal.lastVerified")} {formatDate(act.last_verified)}
                   </p>
                 </div>
@@ -428,6 +446,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
                   <span className="text-xs text-muted-foreground capitalize">{act.identifier_type}</span>
                 </div>
                 <p className="text-xs text-muted-foreground mt-0.5">
+                  {act.seat_email && <>{t("portal.signedInAs", { email: act.seat_email })} · </>}
                   {t("portal.lastVerified")} {formatDate(act.last_verified)}
                 </p>
               </div>
@@ -533,8 +552,10 @@ function SeatsSection({ license }: { license: PortalLicense }) {
   // never gate the Add button in that case.
   const perSeat = license.plan?.per_seat === true
   const maxSeats = license.effective_max_seats ?? license.plan?.max_seats ?? 0
-  const invitationCap = perSeat && maxSeats > 0 ? Math.max(0, maxSeats - 1) : maxSeats
-  const memberCount = activeCount + (perSeat ? 1 : 0)
+  // On a per-seat plan the owner is seat #1 unless they released it.
+  const ownerHoldsSeat = perSeat && !license.owner_seat_released
+  const invitationCap = perSeat && maxSeats > 0 ? Math.max(0, maxSeats - (ownerHoldsSeat ? 1 : 0)) : maxSeats
+  const memberCount = activeCount + (ownerHoldsSeat ? 1 : 0)
   const atLimit = invitationCap > 0 ? activeCount >= invitationCap : perSeat && maxSeats > 0
   const overLimit = perSeat && maxSeats > 0 && activeCount > invitationCap
 
@@ -549,8 +570,34 @@ function SeatsSection({ license }: { license: PortalLicense }) {
   const isAcceptedAdmin = !!mySeat?.accepted_at && mySeat.role === "admin"
   const canManage = isLicenseOwner || isAcceptedAdmin
 
+  const ownerSeatMut = useMutation({
+    mutationFn: (released: boolean) => portal.setOwnerSeat({ license_id: license.id, released }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
+      qc.invalidateQueries({ queryKey: ["portal", "activations", license.id] })
+    },
+  })
+
   return (
     <div className="space-y-3">
+      {isLicenseOwner && perSeat && (
+        <div className="flex items-center justify-between gap-3 flex-wrap bg-muted/50 rounded px-3 py-2 text-sm">
+          <div className="min-w-0">
+            <p className="font-medium">{t("portal.ownerSeatTitle")}</p>
+            <p className="text-xs text-muted-foreground">
+              {ownerHoldsSeat ? t("portal.ownerSeatHeld", { email: license.email }) : t("portal.ownerSeatReleased")}
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={ownerSeatMut.isPending}
+            onClick={() => ownerSeatMut.mutate(ownerHoldsSeat)}
+          >
+            {ownerHoldsSeat ? t("portal.ownerSeatRelease") : t("portal.ownerSeatTake")}
+          </Button>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium">
           {t("portal.teamMembers")} ({memberCount}/{maxSeats === 0 ? t("common.unlimitedSymbol") : maxSeats})

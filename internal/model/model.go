@@ -262,11 +262,19 @@ type Plan struct {
 	FloatingTimeout      int    `bun:",notnull" json:"floating_timeout"`
 	// TokenTTLDays is how long a signed token may be used offline
 	// before the client must verify again. 0 = server default.
-	TokenTTLDays int       `bun:",notnull" json:"token_ttl_days"`
-	MaxSeats     int       `bun:",notnull" json:"max_seats"`
-	Active       bool      `bun:",notnull,default:true" json:"active"`
-	SortOrder    int       `bun:",default:0" json:"sort_order"`
-	CreatedAt    time.Time `bun:",nullzero,default:now()" json:"created_at"`
+	TokenTTLDays int `bun:",notnull" json:"token_ttl_days"`
+	MaxSeats     int `bun:",notnull" json:"max_seats"`
+	// Seat-bound desktop sign-in policy (see SeatDevicePolicy). The
+	// columns default to 1 / 2 / 180 / false for existing plans; the
+	// admin handler supplies the same defaults when a new plan omits
+	// them, so no bun default tags here (see the warning above).
+	MaxDevicesPerSeat    int       `bun:",notnull" json:"max_devices_per_seat"`
+	MaxDeviceMovesPer30d int       `bun:"max_device_moves_per_30d,notnull" json:"max_device_moves_per_30d"`
+	ReauthDays           int       `bun:",notnull" json:"reauth_days"`
+	RequireSeatSignin    bool      `bun:",notnull" json:"require_seat_signin"`
+	Active               bool      `bun:",notnull,default:true" json:"active"`
+	SortOrder            int       `bun:",default:0" json:"sort_order"`
+	CreatedAt            time.Time `bun:",nullzero,default:now()" json:"created_at"`
 
 	Product      *Product       `bun:"rel:belongs-to,join:product_id=id" json:"product,omitempty"`
 	Entitlements []*Entitlement `bun:"rel:has-many,join:id=plan_id" json:"entitlements,omitempty"`
@@ -397,6 +405,12 @@ type License struct {
 	ExternalCustomerID  string `bun:",notnull,default:''" json:"external_customer_id,omitempty"`
 	ExternalWorkspaceID string `bun:",notnull,default:''" json:"external_workspace_id,omitempty"`
 
+	// OwnerSeatReleased is set when the owner only administers the
+	// licence: they do not occupy a seat and cannot sign a desktop in,
+	// so every seat can go to an invitee. False (the zero value) keeps
+	// the per-seat rule that the owner is seat #1.
+	OwnerSeatReleased bool `bun:",notnull" json:"owner_seat_released"`
+
 	CreatedAt time.Time `bun:",nullzero,default:now()" json:"created_at"`
 	UpdatedAt time.Time `bun:",nullzero,default:now()" json:"updated_at"`
 
@@ -465,7 +479,8 @@ func (l *License) EffectiveLimits() Limits {
 	activationsLimit := scaleLimit(activations, quantity)
 	seatsLimit := scaleLimit(seats, quantity)
 	invitationsLimit := seatsLimit
-	if !seatsLimit.Unlimited {
+	// The owner occupies one seat unless they have released it.
+	if !seatsLimit.Unlimited && !l.OwnerSeatReleased {
 		invitationsLimit.Value--
 	}
 	return Limits{Activations: activationsLimit, Seats: seatsLimit, Invitations: invitationsLimit}
@@ -536,7 +551,96 @@ type Activation struct {
 	LastVerified   time.Time `bun:",nullzero,default:now()" json:"last_verified"`
 	CreatedAt      time.Time `bun:",nullzero,default:now()" json:"created_at"`
 
+	// Seat-bound desktop sign-in. SeatEmail is empty for a licence-key
+	// activation. The secrets are hashes; the device holds the plain
+	// current secret and trades it for a new one on every verify.
+	SeatEmail            string     `bun:",nullzero" json:"seat_email,omitempty"`
+	Fingerprint          string     `bun:",notnull,default:''" json:"-"`
+	DeviceSecretHash     string     `bun:",nullzero" json:"-"`
+	PrevDeviceSecretHash string     `bun:",nullzero" json:"-"`
+	SecretRotatedAt      *time.Time `json:"-"`
+	SignedInAt           *time.Time `json:"signed_in_at,omitempty"`
+
 	License *License `bun:"rel:belongs-to,join:license_id=id" json:"license,omitempty"`
+}
+
+// SeatBound reports whether the activation was made by a seat sign-in
+// rather than with the licence key.
+func (a *Activation) SeatBound() bool { return a != nil && a.SeatEmail != "" }
+
+// DesktopSigninRequest is one emailed-link sign-in attempt from a
+// desktop app. Status moves pending → approved → consumed, or pending →
+// refused; a pending row past ExpiresAt is dead.
+type DesktopSigninRequest struct {
+	bun.BaseModel `bun:"table:desktop_signin_requests"`
+
+	ID             string     `bun:",pk" json:"id"`
+	ProductID      string     `bun:",notnull" json:"product_id"`
+	Email          string     `bun:",notnull" json:"email"`
+	Identifier     string     `bun:",notnull" json:"identifier"`
+	Label          string     `bun:",notnull,default:''" json:"label"`
+	Fingerprint    string     `bun:",notnull,default:''" json:"-"`
+	LinkTokenHash  string     `bun:",notnull" json:"-"`
+	PollSecretHash string     `bun:",notnull" json:"-"`
+	Status         string     `bun:",notnull,default:'pending'" json:"status"`
+	RefuseCode     string     `bun:",notnull,default:''" json:"refuse_code,omitempty"`
+	NextMoveAt     *time.Time `json:"next_move_at,omitempty"`
+	LicenseID      string     `bun:",nullzero" json:"license_id,omitempty"`
+	ActivationID   string     `bun:",nullzero" json:"activation_id,omitempty"`
+	CreatedIP      string     `bun:",notnull,default:''" json:"-"`
+	ExpiresAt      time.Time  `bun:",notnull" json:"expires_at"`
+	ApprovedAt     *time.Time `json:"approved_at,omitempty"`
+	CreatedAt      time.Time  `bun:",nullzero,default:now()" json:"created_at"`
+}
+
+const (
+	SigninPending  = "pending"
+	SigninApproved = "approved"
+	SigninRefused  = "refused"
+	SigninConsumed = "consumed"
+)
+
+// SeatDeviceEvent records a sign-in on a device that is new to a seat.
+type SeatDeviceEvent struct {
+	bun.BaseModel `bun:"table:seat_device_events"`
+
+	ID         string    `bun:",pk"`
+	LicenseID  string    `bun:",notnull"`
+	Email      string    `bun:",notnull"`
+	Identifier string    `bun:",notnull"`
+	IsMove     bool      `bun:",notnull"`
+	CreatedAt  time.Time `bun:",nullzero,default:now()"`
+}
+
+// SeatDevicePolicy is a plan's seat sign-in policy with the runtime
+// readings applied: devices below one read as one, and a zero reauth
+// interval means a sign-in never lapses.
+type SeatDevicePolicy struct {
+	DevicesPerSeat int
+	MovesPer30d    int
+	ReauthDays     int
+}
+
+// SeatDevicePolicy returns the licence's seat sign-in policy. A licence
+// without a loaded plan gets the column defaults.
+func (l *License) SeatDevicePolicy() SeatDevicePolicy {
+	p := SeatDevicePolicy{DevicesPerSeat: 1, MovesPer30d: 2, ReauthDays: 180}
+	if l == nil || l.Plan == nil {
+		return p
+	}
+	p.DevicesPerSeat = l.Plan.MaxDevicesPerSeat
+	if p.DevicesPerSeat < 1 {
+		p.DevicesPerSeat = 1
+	}
+	p.MovesPer30d = l.Plan.MaxDeviceMovesPer30d
+	if p.MovesPer30d < 0 {
+		p.MovesPer30d = 0
+	}
+	p.ReauthDays = l.Plan.ReauthDays
+	if p.ReauthDays < 0 {
+		p.ReauthDays = 0
+	}
+	return p
 }
 
 // ─── Audit Log ───

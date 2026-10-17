@@ -55,6 +55,14 @@ type VerifyToken struct {
 	GraceDays    int    `json:"grc"`
 	Nonce        string `json:"nce"`           // unique per-issuance to prevent replay
 	Fingerprint  string `json:"fpr,omitempty"` // SHA256(identifier+product_id) for binding
+	// Seat-bound sign-in only (omitted for licence-key activations):
+	// the address the device is signed in as, the seat it occupies
+	// (empty for the owner, who has no seat row), and the unix second
+	// after which the device must sign in again. exp never runs past
+	// ReauthAt, so a device cannot outlast its sign-in offline.
+	Email    string `json:"eml,omitempty"`
+	SeatID   string `json:"sid,omitempty"`
+	ReauthAt int64  `json:"rau,omitempty"`
 }
 
 // PrivateKeyFromHex parses a 32-byte ed25519 seed (64 hex chars) and

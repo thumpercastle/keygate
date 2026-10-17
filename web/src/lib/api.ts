@@ -167,6 +167,24 @@ export const invites = {
     ),
 }
 
+// ─── Desktop sign-in ───
+// The page an emailed sign-in link opens. describe only reads; approve
+// is the button. The link token is the credential.
+export interface DesktopSignin {
+  status: "pending" | "approved" | "refused"
+  email: string
+  label: string
+  product_name?: string
+  expires_at: string
+  refuse_code?: string
+  next_move_at?: string
+}
+
+export const desktopSignin = {
+  describe: (token: string) => post<DesktopSignin>("/license/seat/signin/describe", { token }),
+  approve: (token: string) => post<DesktopSignin>("/license/seat/signin/approve", { token }),
+}
+
 // ─── Portal ───
 export const portal = {
   licenses: () => get<{ licenses: PortalLicense[]; renewals_enabled?: boolean }>("/portal/licenses"),
@@ -195,6 +213,9 @@ export const portal = {
   addSeat: (data: { license_key: string; email: string; role?: string }) => post<Seat>("/portal/seats/add", data),
   removeSeat: (data: { license_key: string; seat_id: string }) =>
     post<{ status: string }>("/portal/seats/remove", data),
+  // Owner only: give up (or take back) the owner's own seat.
+  setOwnerSeat: (data: { license_id: string; released: boolean }) =>
+    post<{ owner_seat_released: boolean }>("/portal/licenses/owner-seat", data),
   changePlan: (data: { license_id: string; new_price_id: string; prorate?: boolean }) =>
     post<{ status: string; new_plan_id: string; new_plan_name: string; proration: string }>(
       "/portal/subscription/change-plan",
@@ -635,6 +656,13 @@ export interface Plan {
   updates_days?: number
   renewal_days?: number
   stripe_renewal_price_id?: string
+  // Seat sign-in policy: devices one seat may hold, sign-ins on a new
+  // device per seat in any 30 days, days before a device must sign in
+  // again (0 = never), and whether the licence key may still activate.
+  max_devices_per_seat?: number
+  max_device_moves_per_30d?: number
+  reauth_days?: number
+  require_seat_signin?: boolean
   active: boolean
   sort_order: number
   created_at: string
@@ -681,6 +709,8 @@ export interface License {
   notes?: string
   external_customer_id?: string
   external_workspace_id?: string
+  // The owner administers without occupying a seat.
+  owner_seat_released?: boolean
   created_at: string
   updated_at: string
   product?: Product
@@ -698,9 +728,10 @@ export interface License {
   addons?: LicenseAddon[]
 }
 
-// The portal always receives the key: it is the customer's own
-// credential and also names the license in the activation and seat
-// endpoints. Admin payloads never carry it.
+// The portal receives the key only for the owner and seat admins: it
+// names the license in the activation and seat endpoints. A member gets
+// an empty string — they sign in to the app with their email instead.
+// Admin payloads never carry it.
 export interface PortalLicense extends License {
   license_key: string
 }
@@ -714,6 +745,10 @@ export interface Activation {
   ip_address?: string
   last_verified: string
   created_at: string
+  // Seat sign-in: who the device is signed in as. Absent for a device
+  // activated with the licence key.
+  seat_email?: string
+  signed_in_at?: string
 }
 
 export interface APIKey {

@@ -49,24 +49,32 @@ type portalActivationView struct {
 	// No omitempty: it does nothing on a struct, and this column has a
 	// default of now(), so the field is always present anyway.
 	LastVerified time.Time `json:"last_verified"`
+	// Seat sign-in: who the device is signed in as, and when that
+	// sign-in happened. Empty for a licence-key activation.
+	SeatEmail  string     `json:"seat_email,omitempty"`
+	SignedInAt *time.Time `json:"signed_in_at,omitempty"`
 }
 
 // resolveOwnedLicense loads the license at :license_key and verifies
 // the logged-in user owns it (matches license.email OR has a seat).
 // Returns nil-without-writing if not authorised; the response is
 // already written when err==true.
-func (h *PortalActivationsHandler) resolveOwnedLicense(c *gin.Context) (*model.License, bool) {
+//
+// manager is true for the owner and accepted seat admins, who see and
+// manage every device. A member sees and signs out only the devices
+// signed in with their own seat.
+func (h *PortalActivationsHandler) resolveOwnedLicense(c *gin.Context) (lic *model.License, manager bool, ok bool) {
 	keyRaw := strings.TrimSpace(c.Param("license_key"))
 	if keyRaw == "" {
 		response.BadRequest(c, "license_key is required in the URL path")
-		return nil, false
+		return nil, false, false
 	}
 
 	emailVal, _ := c.Get("email")
 	emailStr, _ := emailVal.(string)
 	if emailStr == "" {
 		response.Unauthorized(c, "unauthorized")
-		return nil, false
+		return nil, false, false
 	}
 
 	lic, err := h.store.FindLicenseByKey(c.Request.Context(), keyRaw)
@@ -75,26 +83,31 @@ func (h *PortalActivationsHandler) resolveOwnedLicense(c *gin.Context) (*model.L
 		// — both 404. Stops portal from being a license-key existence
 		// oracle for an authenticated but malicious user.
 		response.NotFound(c, "license not found")
-		return nil, false
+		return nil, false, false
 	}
 
 	if strings.EqualFold(lic.Email, emailStr) {
-		return lic, true
+		return lic, true, true
 	}
 	// ACCEPTED seat (admin or member) can also manage activations on
 	// their license. Pending invites confer no authority — possessing
 	// an unclaimed invite token shouldn't let an OTP-logged-in user
 	// burn through activation slots before going through accept.
 	if seat, err := h.store.FindSeatByEmail(c.Request.Context(), lic.ID, emailStr); err == nil && seat.AcceptedAt != nil {
-		return lic, true
+		return lic, seat.Role == "admin", true
 	}
 	response.NotFound(c, "license not found")
-	return nil, false
+	return nil, false, false
+}
+
+// visible reports whether the caller may see and sign out a device.
+func visible(a *model.Activation, manager bool, email string) bool {
+	return manager || (a.SeatEmail != "" && strings.EqualFold(a.SeatEmail, email))
 }
 
 // GET /api/v1/portal/licenses/:license_key/activations
 func (h *PortalActivationsHandler) List(c *gin.Context) {
-	lic, ok := h.resolveOwnedLicense(c)
+	lic, manager, ok := h.resolveOwnedLicense(c)
 	if !ok {
 		return
 	}
@@ -103,8 +116,12 @@ func (h *PortalActivationsHandler) List(c *gin.Context) {
 		response.Internal(c, err)
 		return
 	}
+	email := emailFromContext(c)
 	out := make([]portalActivationView, 0, len(rows))
 	for _, a := range rows {
+		if !visible(a, manager, email) {
+			continue
+		}
 		out = append(out, portalActivationView{
 			ID:             a.ID,
 			Identifier:     a.Identifier,
@@ -113,6 +130,8 @@ func (h *PortalActivationsHandler) List(c *gin.Context) {
 			IPAddress:      a.IPAddress,
 			CreatedAt:      a.CreatedAt,
 			LastVerified:   a.LastVerified,
+			SeatEmail:      a.SeatEmail,
+			SignedInAt:     a.SignedInAt,
 		})
 	}
 	response.OK(c, gin.H{"activations": response.Array(out), "max": maxActivationsForLicense(lic)})
@@ -120,7 +139,7 @@ func (h *PortalActivationsHandler) List(c *gin.Context) {
 
 // DELETE /api/v1/portal/licenses/:license_key/activations/:activation_id
 func (h *PortalActivationsHandler) Delete(c *gin.Context) {
-	lic, ok := h.resolveOwnedLicense(c)
+	lic, manager, ok := h.resolveOwnedLicense(c)
 	if !ok {
 		return
 	}
@@ -139,8 +158,9 @@ func (h *PortalActivationsHandler) Delete(c *gin.Context) {
 		return
 	}
 	var removed *model.Activation
+	email := emailFromContext(c)
 	for _, a := range rows {
-		if a.ID == activationID {
+		if a.ID == activationID && visible(a, manager, email) {
 			removed = a
 			break
 		}

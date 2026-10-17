@@ -354,6 +354,10 @@ function PlanDialog({
     license_model: plan?.license_model || "standard",
     floating_timeout: plan?.floating_timeout ?? 30,
     token_ttl_days: plan?.token_ttl_days ?? 0,
+    max_devices_per_seat: plan?.max_devices_per_seat ?? 1,
+    max_device_moves_per_30d: plan?.max_device_moves_per_30d ?? 2,
+    reauth_days: plan?.reauth_days ?? 180,
+    require_seat_signin: plan?.require_seat_signin ?? false,
     active: plan?.active ?? true,
     stripe_price_id: plan?.stripe_price_id || "",
     updates_days: plan?.updates_days ?? 0,
@@ -601,6 +605,56 @@ function PlanDialog({
                   />
                   <p className="text-xs text-muted-foreground">{t("plans.tokenTtlDaysHint")}</p>
                 </div>
+              )}
+              {/* Seat sign-in: a person signs the desktop app in with
+                their seat's email instead of the licence key. Needs both
+                seats and device activations, so hybrid products only. */}
+              {supports.activations && supports.seats && (
+                <>
+                  <p className="text-sm font-medium sm:col-span-2 pt-2">{t("plans.seatSigninSection")}</p>
+                  <div className="space-y-2">
+                    <Label>{t("plans.maxDevicesPerSeat")}</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={form.max_devices_per_seat}
+                      onChange={(e) => set("max_devices_per_seat", Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("plans.maxDeviceMoves")}</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={1000}
+                      value={form.max_device_moves_per_30d}
+                      onChange={(e) => set("max_device_moves_per_30d", Number(e.target.value))}
+                    />
+                    <p className="text-xs text-muted-foreground">{t("plans.maxDeviceMovesHint")}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("plans.reauthDays")}</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={3650}
+                      value={form.reauth_days}
+                      onChange={(e) => set("reauth_days", Number(e.target.value))}
+                    />
+                    <p className="text-xs text-muted-foreground">{t("plans.reauthDaysHint")}</p>
+                  </div>
+                  <div className="space-y-2 flex items-center gap-3 pt-5">
+                    <input
+                      type="checkbox"
+                      checked={form.require_seat_signin}
+                      onChange={(e) => set("require_seat_signin", e.target.checked)}
+                      className="h-4 w-4 rounded border-input accent-primary"
+                      id="plan-require-seat-signin"
+                    />
+                    <Label htmlFor="plan-require-seat-signin">{t("plans.requireSeatSignin")}</Label>
+                  </div>
+                </>
               )}
               <div className="space-y-2">
                 <Label>{t("plans.trialDays")}</Label>

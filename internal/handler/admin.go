@@ -937,9 +937,21 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		FloatingTimeout      *int   `json:"floating_timeout"`
 		TokenTTLDays         int    `json:"token_ttl_days"`
 		SortOrder            int    `json:"sort_order"`
+		// Seat sign-in policy; omitted fields take the defaults
+		// (1 device, 2 moves per 30 days, re-sign-in every 180 days).
+		MaxDevicesPerSeat    *int `json:"max_devices_per_seat"`
+		MaxDeviceMovesPer30d *int `json:"max_device_moves_per_30d"`
+		ReauthDays           *int `json:"reauth_days"`
+		RequireSeatSignin    bool `json:"require_seat_signin"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "product_id, name, slug, and license_type are required")
+		return
+	}
+	seatPolicy := seatDevicePolicy{Devices: 1, Moves: 2, Reauth: 180}
+	seatPolicy.apply(req.MaxDevicesPerSeat, req.MaxDeviceMovesPer30d, req.ReauthDays)
+	if err := seatPolicy.validate(); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 	minQuantity, maxQuantity, err := normalizeQuantityBounds(req.MinQuantity, req.MaxQuantity)
@@ -1086,6 +1098,10 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		LicenseModel:         licenseModel,
 		FloatingTimeout:      floatingTimeout,
 		TokenTTLDays:         req.TokenTTLDays,
+		MaxDevicesPerSeat:    seatPolicy.Devices,
+		MaxDeviceMovesPer30d: seatPolicy.Moves,
+		ReauthDays:           seatPolicy.Reauth,
+		RequireSeatSignin:    req.RequireSeatSignin,
 		Active:               true,
 		SortOrder:            req.SortOrder,
 	}
@@ -1141,10 +1157,24 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		TokenTTLDays         *int    `json:"token_ttl_days"`
 		Active               *bool   `json:"active"`
 		SortOrder            *int    `json:"sort_order"`
+		MaxDevicesPerSeat    *int    `json:"max_devices_per_seat"`
+		MaxDeviceMovesPer30d *int    `json:"max_device_moves_per_30d"`
+		ReauthDays           *int    `json:"reauth_days"`
+		RequireSeatSignin    *bool   `json:"require_seat_signin"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request body")
 		return
+	}
+	seatPolicy := seatDevicePolicy{Devices: p.MaxDevicesPerSeat, Moves: p.MaxDeviceMovesPer30d, Reauth: p.ReauthDays}
+	seatPolicy.apply(req.MaxDevicesPerSeat, req.MaxDeviceMovesPer30d, req.ReauthDays)
+	// Checked only when the request touches the policy, so an
+	// unrelated edit never trips over a value stored before it existed.
+	if req.MaxDevicesPerSeat != nil || req.MaxDeviceMovesPer30d != nil || req.ReauthDays != nil {
+		if err := seatPolicy.validate(); err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
 	}
 	perSeat := p.PerSeat
 	if req.PerSeat != nil {
@@ -1439,6 +1469,22 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	if req.Active != nil {
 		p.Active = *req.Active
 		cols = append(cols, "active")
+	}
+	if req.MaxDevicesPerSeat != nil {
+		p.MaxDevicesPerSeat = seatPolicy.Devices
+		cols = append(cols, "max_devices_per_seat")
+	}
+	if req.MaxDeviceMovesPer30d != nil {
+		p.MaxDeviceMovesPer30d = seatPolicy.Moves
+		cols = append(cols, "max_device_moves_per_30d")
+	}
+	if req.ReauthDays != nil {
+		p.ReauthDays = seatPolicy.Reauth
+		cols = append(cols, "reauth_days")
+	}
+	if req.RequireSeatSignin != nil {
+		p.RequireSeatSignin = *req.RequireSeatSignin
+		cols = append(cols, "require_seat_signin")
 	}
 	if req.SortOrder != nil {
 		p.SortOrder = *req.SortOrder
@@ -1913,6 +1959,34 @@ func validatePlanNumericBounds(b planBounds) error {
 		return fmt.Errorf("token_ttl_days cannot be negative")
 	case b.TokenTTLDays > 365:
 		return fmt.Errorf("token_ttl_days cannot exceed 365")
+	}
+	return nil
+}
+
+// seatDevicePolicy is a plan's seat sign-in policy while a request is
+// being validated. Bounds match the plans_seat_device_policy check.
+type seatDevicePolicy struct{ Devices, Moves, Reauth int }
+
+func (p *seatDevicePolicy) apply(devices, moves, reauth *int) {
+	if devices != nil {
+		p.Devices = *devices
+	}
+	if moves != nil {
+		p.Moves = *moves
+	}
+	if reauth != nil {
+		p.Reauth = *reauth
+	}
+}
+
+func (p seatDevicePolicy) validate() error {
+	switch {
+	case p.Devices < 1 || p.Devices > 100:
+		return fmt.Errorf("max_devices_per_seat must be between 1 and 100")
+	case p.Moves < 0 || p.Moves > 1000:
+		return fmt.Errorf("max_device_moves_per_30d must be between 0 and 1000")
+	case p.Reauth < 0 || p.Reauth > 3650:
+		return fmt.Errorf("reauth_days must be between 0 (never) and 3650")
 	}
 	return nil
 }
