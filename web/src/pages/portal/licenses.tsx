@@ -99,18 +99,17 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   const productType = lic.product?.type || "perpetual"
   // Seats UI shows for any plan that *could* have more than one seat.
   // Backend treats max_seats=0 as "no limit", so the only case we hide
-  // is max_seats=1 (true single-seat). Perpetual products don't have
-  // a portal-managed team, so gate on product type too.
+  // is a single-seat plan that is not sold per seat. A per-seat licence
+  // always shows it, even at one seat: the owner can hand that seat to
+  // someone else, and adding people is what buying seats is for.
+  // Perpetual products don't have a portal-managed team, so gate on
+  // product type too.
   const seatCap = lic.effective_max_seats ?? lic.plan?.max_seats ?? 0
   const perSeat = lic.plan?.per_seat === true
   const hasSeatCapability = productType === "saas" || productType === "hybrid"
-  const embeddedActiveSeats = lic.seats?.filter((seat) => !seat.removed_at).length ?? 0
   // Seat management needs the key (it names the licence on the seat
   // endpoints), which only the owner and seat admins receive.
-  const showSeats =
-    !!lic.license_key &&
-    hasSeatCapability &&
-    (perSeat ? seatCap === 0 || seatCap > 1 || embeddedActiveSeats > 0 : seatCap !== 1)
+  const showSeats = !!lic.license_key && hasSeatCapability && (perSeat || seatCap !== 1)
   const entitlements = lic.plan?.entitlements || []
   const hasQuota =
     (productType === "saas" || productType === "hybrid") && entitlements.some((e) => e.value_type === "quota")
