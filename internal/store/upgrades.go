@@ -106,6 +106,7 @@ func MarkLicenseUpgradeAppliedIn(ctx context.Context, db bun.IDB, u *model.Licen
 		"state", "applied_at", "to_plan_id", "stripe_payment_intent_id", "stripe_subscription_id",
 		"from_plan_id", "from_status", "from_valid_until", "from_updates_until",
 		"from_updates_terms_set", "from_payment_provider", "from_stripe_customer_id", "from_canceled_at",
+		"from_quantity",
 	).WherePK().Exec(ctx)
 	return err
 }
@@ -185,7 +186,12 @@ func RevertLicenseUpgradeIn(ctx context.Context, tx bun.IDB, u *model.LicenseUpg
 	cols := []string{
 		"plan_id", "valid_until", "canceled_at", "past_due_at", "updates_until", "updates_terms_set",
 		"payment_provider", "stripe_customer_id", "stripe_subscription_id", "stripe_payment_intent_id",
-		"stripe_checkout_session_id",
+		"stripe_checkout_session_id", "quantity",
+	}
+	// The seats it had before; rows from before the column read 1.
+	l.Quantity = u.FromQuantity
+	if l.Quantity < 1 {
+		l.Quantity = 1
 	}
 	operatorHeld := lic.Status == model.StatusRevoked ||
 		(lic.Status == model.StatusSuspended && lic.SuspendedBy != model.SuspendedByStripe)

@@ -74,8 +74,10 @@ var errUpgradeInProgress = errors.New("an upgrade payment for this license is st
 // back. A licence an admin issued on a priced plan (paid by invoice,
 // through a reseller) is not free and is left alone: "upgrading" a
 // lifetime licence to a monthly plan would end it with the subscription.
+// Nor is a licence on a free per-seat plan: that is a team licence the
+// operator granted, with its own seat count, not a free tier.
 func upgradeable(lic *model.License, current *model.Plan) bool {
-	if current == nil || current.ID != lic.PlanID || !current.IsFree() {
+	if current == nil || current.ID != lic.PlanID || !current.IsFree() || current.PerSeat {
 		return false
 	}
 	if lic.StripeSubscriptionID != "" || lic.PaymentProvider == "stripe" {
@@ -91,11 +93,16 @@ func upgradeable(lic *model.License, current *model.Plan) bool {
 // upgradeTarget reports whether lic may be upgraded to plan: a priced,
 // active plan of the same product. Plans selling an update period and
 // trial plans are left out — the period needs the gating checks a new
-// sale gets, and nobody pays to start a trial.
+// sale gets, and nobody pays to start a trial. A licence with more than
+// one seat only moves to a per-seat plan that can hold them all.
 func upgradeTarget(lic *model.License, plan *model.Plan) bool {
+	seatsFit := lic.Quantity <= 1
+	if plan.PerSeat {
+		seatsFit = plan.MaxQuantity < 1 || lic.Quantity <= plan.MaxQuantity
+	}
 	return plan.Active && plan.ProductID == lic.ProductID && plan.ID != lic.PlanID &&
 		plan.StripePriceID != "" && plan.LicenseType != "trial" &&
-		plan.InitialUpdatesUntil(time.Now()) == nil
+		plan.InitialUpdatesUntil(time.Now()) == nil && seatsFit
 }
 
 // UpgradableLicenses reports which of the licences email owns can be
@@ -241,11 +248,16 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 
 		upgradeID := store.NewLicenseUpgradeID()
 		tags := map[string]string{metaKind: kindUpgrade, metaUpgradeID: upgradeID, metaLicenseID: lic.ID}
+		// A per-seat plan sells seats: start from the seats the licence
+		// has (within the plan's bounds) and let the customer adjust.
+		lineItem := &stripe.CheckoutSessionLineItemParams{Price: stripe.String(plan.StripePriceID), Quantity: stripe.Int64(1)}
+		if plan.PerSeat {
+			lineItem.Quantity = stripe.Int64(int64(plan.ClampQuantity(now.Quantity)))
+			lineItem.AdjustableQuantity = adjustableQuantity(plan)
+		}
 		params := &stripe.CheckoutSessionParams{
-			Mode: stripe.String(string(mode)),
-			LineItems: []*stripe.CheckoutSessionLineItemParams{
-				{Price: stripe.String(plan.StripePriceID), Quantity: stripe.Int64(1)},
-			},
+			Mode:      stripe.String(string(mode)),
+			LineItems: []*stripe.CheckoutSessionLineItemParams{lineItem},
 			SuccessURL:          stripe.String(h.BaseURL + "/checkout/success?session_id={CHECKOUT_SESSION_ID}"),
 			CancelURL:           stripe.String(h.BaseURL + "/portal"),
 			AllowPromotionCodes: stripe.Bool(true),
@@ -491,6 +503,7 @@ func (h *StripeHandler) fulfillUpgrade(ctx context.Context, customerID, subscrip
 		u.FromValidUntil, u.FromUpdatesUntil = locked.ValidUntil, locked.UpdatesUntil
 		u.FromUpdatesTermsSet, u.FromPaymentProvider = locked.UpdatesTermsSet, locked.PaymentProvider
 		u.FromStripeCustomerID, u.FromCanceledAt = locked.StripeCustomerID, locked.CanceledAt
+		u.FromQuantity = locked.Quantity
 		if err := store.MarkLicenseUpgradeAppliedIn(ctx, tx, u); err != nil {
 			return err
 		}
@@ -518,7 +531,18 @@ func (h *StripeHandler) fulfillUpgrade(ctx context.Context, customerID, subscrip
 		l.StripeCheckoutSessionID = sessionID
 		cols := []string{"plan_id", "status", "valid_until", "canceled_at", "past_due_at",
 			"updates_until", "updates_terms_set", "payment_provider", "stripe_customer_id",
-			"stripe_subscription_id", "stripe_payment_intent_id", "stripe_checkout_session_id"}
+			"stripe_subscription_id", "stripe_payment_intent_id", "stripe_checkout_session_id", "quantity"}
+		// Seats are what Stripe bills: a per-seat plan takes the paid
+		// quantity, any other plan holds one.
+		l.Quantity = 1
+		if plan.PerSeat {
+			l.Quantity = plan.ClampQuantity(locked.Quantity)
+			if cur != nil {
+				if item := subscriptionEventItemForPlan(cur, plan); item != nil && item.Quantity >= 1 {
+					l.Quantity = int(item.Quantity)
+				}
+			}
+		}
 		// The subscription as just read from Stripe gives the licence its
 		// period and status in the same write, rather than in a sync
 		// after the commit that nothing retries if it fails.
