@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Check, Copy, Key, Trash2 } from "lucide-react"
-import { useState } from "react"
+import { Check, ChevronDown, Copy, Trash2 } from "lucide-react"
+import { type ReactNode, useState } from "react"
 import { showToast } from "@/components/toast"
 import {
   AlertDialog,
@@ -13,12 +13,17 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAuth } from "@/hooks/use-auth"
 import { type TranslationKeys, useI18n } from "@/i18n"
@@ -59,19 +64,13 @@ export default function PortalLicensesPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">{t("portal.myLicenses")}</h1>
-        <p className="text-muted-foreground">{t("portal.myLicensesDesc")}</p>
-      </div>
+      <h1 className="text-2xl font-semibold tracking-tight">{t("portal.myLicenses")}</h1>
 
       {licenses.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <Key className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-            <p className="text-lg font-medium">{t("portal.noLicenses")}</p>
-            <p className="text-muted-foreground mt-1">{t("portal.noLicensesDesc")}</p>
-          </CardContent>
-        </Card>
+        <div className="rounded-xl border bg-card py-12 px-6 text-center">
+          <p className="font-medium">{t("portal.noLicenses")}</p>
+          <p className="text-sm text-muted-foreground mt-1">{t("portal.noLicensesDesc")}</p>
+        </div>
       ) : (
         <div className="space-y-6">
           {licenses.map((lic) => (
@@ -91,13 +90,13 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   // the server authorises those by the license's own address.
   const isOwner = !!user?.email && user.email.toLowerCase() === lic.email.toLowerCase()
   const [copied, setCopied] = useState(false)
+  const [showKey, setShowKey] = useState(false)
   const [showInvoices, setShowInvoices] = useState(false)
   const [showChangePlan, setShowChangePlan] = useState(false)
   const [showChangeSeats, setShowChangeSeats] = useState(false)
   const [showUpgrade, setShowUpgrade] = useState(false)
   const [showCancel, setShowCancel] = useState(false)
   const productType = lic.product?.type || "perpetual"
-  const showUsage = productType === "saas" || productType === "hybrid"
   // Seats UI shows for any plan that *could* have more than one seat.
   // Backend treats max_seats=0 as "no limit", so the only case we hide
   // is max_seats=1 (true single-seat). Perpetual products don't have
@@ -112,6 +111,12 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
     !!lic.license_key &&
     hasSeatCapability &&
     (perSeat ? seatCap === 0 || seatCap > 1 || embeddedActiveSeats > 0 : seatCap !== 1)
+  const entitlements = lic.plan?.entitlements || []
+  const hasQuota =
+    (productType === "saas" || productType === "hybrid") && entitlements.some((e) => e.value_type === "quota")
+  // A plan that requires seat sign-in never activates by key: people
+  // sign in with their email, so the key is not something to hand out.
+  const keyUsable = !!lic.license_key && lic.plan?.require_seat_signin !== true
 
   const copyKey = () => {
     navigator.clipboard.writeText(lic.license_key)
@@ -123,6 +128,10 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   // subscription. A one-time purchase has none: the backend answers 400
   // to each, so don't offer them.
   const hasSubscription = lic.payment_provider === "stripe" && !!lic.stripe_subscription_id
+  const live = lic.status === "active" || lic.status === "trialing"
+  const canChangeSeats = isOwner && hasSubscription && perSeat && (live || lic.status === "past_due")
+  const canChangePlan = isOwner && hasSubscription && live
+  const hasBilling = isOwner && lic.payment_provider === "stripe"
   // A licence on a free plan upgrades through a checkout and keeps its
   // key. The server says whether this one can (Stripe configured, a free
   // plan, not suspended or revoked, and a paid plan to move to).
@@ -151,7 +160,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
       const res = await portal.renewUpdates({ license_id: lic.id })
       window.location.href = res.url
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "An error occurred")
+      showToast(err instanceof Error ? err.message : t("portal.somethingWentWrong"))
       setRenewing(false)
     }
   }
@@ -161,72 +170,136 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
       const res = await portal.getBillingPortal({ license_id: lic.id })
       window.location.href = res.url
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "An error occurred")
+      showToast(err instanceof Error ? err.message : t("portal.somethingWentWrong"))
     }
   }
 
-  const defaultTab = "overview"
+  // One line that answers "what do I have": seats, devices, and when it
+  // ends. A subscription renews; anything else just has an end date.
+  const deviceCap = !lic.license_key
+    ? (lic.plan?.max_devices_per_seat ?? 1)
+    : perSeat
+      ? (lic.effective_max_activations ?? 0)
+      : (lic.plan?.max_activations ?? 0)
+  const deviceCount = lic.activations?.length || 0
+  const summary: string[] = []
+  if (hasSeatCapability && (perSeat || showSeats)) {
+    summary.push(seatCap === 0 ? t("portal.seatsUnlimited") : t("portal.seatsCount", { count: seatCap }))
+  }
+  summary.push(
+    deviceCap > 0
+      ? t("portal.devicesOfMax", { count: deviceCount, max: deviceCap })
+      : t("portal.devicesCount", { count: deviceCount }),
+  )
+  if (lic.valid_until) {
+    summary.push(
+      t(hasSubscription && live ? "portal.renewsOn" : "portal.endsOn", { date: formatDate(lic.valid_until) }),
+    )
+  } else if (!isPerpetualPlan) {
+    summary.push(t("portal.noEndDate"))
+  }
+
+  // Sections in the order owners reach for them; tabs only when there
+  // is more than one.
+  const sections: { id: string; label: string; node: ReactNode }[] = []
+  if (showSeats) sections.push({ id: "team", label: t("portal.teamMembers"), node: <SeatsSection license={lic} /> })
+  sections.push({ id: "devices", label: t("portal.devices"), node: <ActivationsSection license={lic} /> })
+  if (entitlements.length > 0) {
+    sections.push({
+      id: "features",
+      label: t("portal.featuresIncluded"),
+      node: <EntitlementsSection entitlements={entitlements} />,
+    })
+  }
+  if (hasQuota) sections.push({ id: "usage", label: t("analytics.usage"), node: <QuotaUsageSection license={lic} /> })
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle className="text-lg">{lic.product?.name || "License"}</CardTitle>
-            <p className="text-sm text-muted-foreground mt-1">{lic.plan?.name}</p>
+    <section className="rounded-xl border bg-card text-card-foreground">
+      <div className="p-6 space-y-5">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0 space-y-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-lg font-semibold leading-tight">{lic.plan?.name || lic.product?.name}</h2>
+              {lic.status !== "active" && (
+                <Badge className={statusColor(lic.status)}>{t(`status.${lic.status}` as TranslationKeys)}</Badge>
+              )}
+            </div>
+            <p className="text-sm text-muted-foreground">{summary.join(" · ")}</p>
           </div>
-          <Badge className={statusColor(lic.status)}>{t(`status.${lic.status}` as TranslationKeys)}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* License key — owner and seat admins only; members sign in with their email */}
-        {lic.license_key ? (
-          <div className="flex items-center gap-2 bg-muted rounded-lg px-3 py-2">
-            <Key className="h-4 w-4 text-muted-foreground shrink-0" />
-            <code className="text-sm flex-1 truncate">{lic.license_key}</code>
-            <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={copyKey}>
-              {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
-            </Button>
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">{t("portal.keyManagersOnly")}</p>
-        )}
 
-        {/* Overview stats */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <div>
-            <p className="text-muted-foreground">{t("portal.validFrom")}</p>
-            <p className="font-medium">{formatDate(lic.valid_from)}</p>
-          </div>
-          <div>
-            <p className="text-muted-foreground">{t("licenses.validUntil")}</p>
-            <p className="font-medium">{formatDate(lic.valid_until)}</p>
-          </div>
-          <div>
-            <p className="text-muted-foreground">{t("licenses.activations")}</p>
-            <p className="font-medium">
-              {lic.activations?.length || 0} /{" "}
-              {!lic.license_key
-                ? (lic.plan?.max_devices_per_seat ?? 1)
-                : perSeat
-                  ? lic.effective_max_activations === 0
-                    ? t("common.unlimitedSymbol")
-                    : lic.effective_max_activations
-                  : lic.plan?.max_activations || "-"}
-            </p>
-          </div>
-          {hasSeatCapability && (perSeat || showSeats) && (
-            <div>
-              <p className="text-muted-foreground">{t("licenses.seats")}</p>
-              <p className="font-medium">{seatCap === 0 ? t("common.unlimited") : seatCap}</p>
+          {(canUpgrade || canChangeSeats || canChangePlan || hasBilling || keyUsable) && (
+            <div className="flex items-center gap-2 flex-wrap">
+              {canUpgrade && (
+                <Button size="sm" onClick={() => setShowUpgrade(true)}>
+                  {t("portal.upgrade")}
+                </Button>
+              )}
+              {canChangeSeats && (
+                <Button size="sm" onClick={() => setShowChangeSeats(true)}>
+                  {t("portal.changeSeats")}
+                </Button>
+              )}
+              {canChangePlan && (
+                <Button size="sm" variant="outline" onClick={() => setShowChangePlan(true)}>
+                  {t("portal.changePlan")}
+                </Button>
+              )}
+              {(hasBilling || keyUsable) && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button size="sm" variant="outline" aria-label={t("portal.moreActions")}>
+                      {hasBilling ? t("portal.billing") : t("portal.more")}
+                      <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-60" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {hasBilling && (
+                      <DropdownMenuItem onClick={() => setShowInvoices(true)}>
+                        {t("portal.viewInvoices")}
+                      </DropdownMenuItem>
+                    )}
+                    {hasBilling && hasSubscription && (
+                      <DropdownMenuItem onClick={handleBillingPortal}>{t("portal.updatePayment")}</DropdownMenuItem>
+                    )}
+                    {keyUsable && (
+                      <DropdownMenuItem onClick={() => setShowKey((v) => !v)}>
+                        {showKey ? t("portal.hideKey") : t("portal.showKey")}
+                      </DropdownMenuItem>
+                    )}
+                    {hasBilling && hasSubscription && live && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem className="text-destructive" onClick={() => setShowCancel(true)}>
+                          {t("portal.cancelSubscription")}
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
             </div>
           )}
         </div>
 
+        {keyUsable && showKey && (
+          <div className="flex items-center gap-2 rounded-lg bg-muted px-3 py-2">
+            <code className="text-sm flex-1 truncate">{lic.license_key}</code>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0"
+              onClick={copyKey}
+              aria-label={t("portal.copyKey")}
+            >
+              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            </Button>
+          </div>
+        )}
+
         {/* Maintenance period */}
         {isPerpetualPlan && (
           <div className="flex items-center justify-between gap-3 flex-wrap text-sm">
-            <p className={cn(updatesEnded ? "text-muted-foreground" : "", updatesEndingSoon ? "text-amber-600" : "")}>
+            <p className={cn(updatesEnded && "text-muted-foreground", updatesEndingSoon && "text-destructive")}>
               {updatesUntil === null
                 ? t("portal.updatesForLife")
                 : updatesEnded
@@ -245,94 +318,42 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
             )}
           </div>
         )}
+      </div>
 
-        {canUpgrade && (
-          <div className="flex gap-2 flex-wrap">
-            <Button size="sm" onClick={() => setShowUpgrade(true)}>
-              {t("portal.upgrade")}
-            </Button>
-          </div>
+      <div className="border-t px-6 py-5">
+        {sections.length === 1 ? (
+          sections[0].node
+        ) : (
+          <Tabs defaultValue={sections[0].id}>
+            <TabsList>
+              {sections.map((s) => (
+                <TabsTrigger key={s.id} value={s.id}>
+                  {s.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {sections.map((s) => (
+              <TabsContent key={s.id} value={s.id} className="mt-4">
+                {s.node}
+              </TabsContent>
+            ))}
+          </Tabs>
         )}
+      </div>
 
-        {/* Billing actions (license holder only) */}
-        {isOwner && lic.payment_provider === "stripe" && (
-          <div className="flex gap-2 flex-wrap">
-            <Button variant="outline" size="sm" onClick={() => setShowInvoices(true)}>
-              {t("portal.viewInvoices")}
-            </Button>
-            {hasSubscription && (
-              <Button variant="outline" size="sm" onClick={handleBillingPortal}>
-                {t("portal.updatePayment")}
-              </Button>
-            )}
-            {hasSubscription &&
-              perSeat &&
-              (lic.status === "active" || lic.status === "trialing" || lic.status === "past_due") && (
-                <Button variant="outline" size="sm" onClick={() => setShowChangeSeats(true)}>
-                  {t("portal.changeSeats")}
-                </Button>
-              )}
-            {hasSubscription && (lic.status === "active" || lic.status === "trialing") && (
-              <>
-                <Button variant="outline" size="sm" onClick={() => setShowChangePlan(true)}>
-                  {t("portal.changePlan")}
-                </Button>
-                <Button variant="outline" size="sm" className="text-destructive" onClick={() => setShowCancel(true)}>
-                  {t("portal.cancelSubscription")}
-                </Button>
-              </>
-            )}
-          </div>
-        )}
-
-        <Separator />
-
-        {/* Tabs for detailed sections */}
-        <Tabs defaultValue={defaultTab}>
-          <TabsList>
-            <TabsTrigger value="overview">{t("licenses.activations")}</TabsTrigger>
-            <TabsTrigger value="entitlements">{t("plans.entitlements")}</TabsTrigger>
-            {showUsage && <TabsTrigger value="usage">{t("analytics.usage")}</TabsTrigger>}
-            {showSeats && <TabsTrigger value="seats">{t("portal.teamMembers")}</TabsTrigger>}
-          </TabsList>
-
-          <TabsContent value="overview" className="mt-4">
-            <ActivationsSection license={lic} />
-          </TabsContent>
-
-          <TabsContent value="entitlements" className="mt-4">
-            <EntitlementsSection entitlements={lic.plan?.entitlements || []} />
-          </TabsContent>
-
-          {showUsage && (
-            <TabsContent value="usage" className="mt-4">
-              <QuotaUsageSection license={lic} />
-            </TabsContent>
-          )}
-
-          {showSeats && (
-            <TabsContent value="seats" className="mt-4">
-              <SeatsSection license={lic} />
-            </TabsContent>
-          )}
-        </Tabs>
-
-        {showCancel && (
-          <CancelDialog
-            licenseId={lic.id}
-            provider={lic.payment_provider || ""}
-            productName={lic.product?.name || ""}
-            onClose={() => setShowCancel(false)}
-          />
-        )}
-
-        {showInvoices && <InvoicesDialog licenseId={lic.id} onClose={() => setShowInvoices(false)} />}
-
-        {showChangePlan && <ChangePlanDialog license={lic} onClose={() => setShowChangePlan(false)} />}
-        {showChangeSeats && <ChangeSeatsDialog license={lic} onClose={() => setShowChangeSeats(false)} />}
-        {showUpgrade && <UpgradeDialog license={lic} onClose={() => setShowUpgrade(false)} />}
-      </CardContent>
-    </Card>
+      {showCancel && (
+        <CancelDialog
+          licenseId={lic.id}
+          provider={lic.payment_provider || ""}
+          productName={lic.product?.name || ""}
+          onClose={() => setShowCancel(false)}
+        />
+      )}
+      {showInvoices && <InvoicesDialog licenseId={lic.id} onClose={() => setShowInvoices(false)} />}
+      {showChangePlan && <ChangePlanDialog license={lic} onClose={() => setShowChangePlan(false)} />}
+      {showChangeSeats && <ChangeSeatsDialog license={lic} onClose={() => setShowChangeSeats(false)} />}
+      {showUpgrade && <UpgradeDialog license={lic} onClose={() => setShowUpgrade(false)} />}
+    </section>
   )
 }
 
@@ -405,26 +426,18 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
     const overLimit = license.plan?.per_seat === true && effectiveMax > 0 && embedded.length > effectiveMax
     return (
       <div className="space-y-3">
-        <p className="text-sm font-medium">
-          {t("portal.activeDevices")} ({embedded.length}
-          {effectiveMax > 0 ? `/${effectiveMax}` : ""})
-        </p>
-        {overLimit && <p className="text-xs text-amber-700 dark:text-amber-400">{t("portal.activationsOverLimit")}</p>}
+        {overLimit && <p className="text-sm text-destructive">{t("portal.activationsOverLimit")}</p>}
         {embedded.length === 0 ? (
           <p className="text-sm text-muted-foreground py-4 text-center">{t("portal.noDevices")}</p>
         ) : (
-          <div className="space-y-2">
+          <div className="divide-y">
             {embedded.map((act) => (
-              <div key={act.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2 text-sm">
+              <div key={act.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <code className="text-xs truncate">{act.identifier}</code>
-                    {act.label && <span className="text-muted-foreground text-xs">({act.label})</span>}
-                    <span className="text-xs text-muted-foreground capitalize">{act.identifier_type}</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {act.seat_email && <>{t("portal.signedInAs", { email: act.seat_email })} · </>}
-                    {t("portal.lastVerified")} {formatDate(act.last_verified)}
+                  <p className="font-medium truncate">{act.label || t("portal.unnamedDevice")}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                    {act.seat_email && <>{act.seat_email} · </>}
+                    {t("portal.lastSeen", { date: formatDate(act.last_verified) })}
                   </p>
                 </div>
               </div>
@@ -441,31 +454,21 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-medium">
-          {t("portal.activeDevices")} ({activations.length}
-          {max > 0 ? `/${max}` : ""})
-        </p>
-      </div>
-      {overLimit && <p className="text-xs text-amber-700 dark:text-amber-400">{t("portal.activationsOverLimit")}</p>}
+      {overLimit && <p className="text-sm text-destructive">{t("portal.activationsOverLimit")}</p>}
 
       {actQuery.isLoading ? (
         <div className="h-16 animate-pulse bg-muted rounded-lg" />
       ) : activations.length === 0 ? (
         <p className="text-sm text-muted-foreground py-4 text-center">{t("portal.noDevices")}</p>
       ) : (
-        <div className="space-y-2">
+        <div className="divide-y">
           {activations.map((act) => (
-            <div key={act.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2 text-sm">
+            <div key={act.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <code className="text-xs truncate">{act.identifier}</code>
-                  {act.label && <span className="text-muted-foreground text-xs">({act.label})</span>}
-                  <span className="text-xs text-muted-foreground capitalize">{act.identifier_type}</span>
-                </div>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {act.seat_email && <>{t("portal.signedInAs", { email: act.seat_email })} · </>}
-                  {t("portal.lastVerified")} {formatDate(act.last_verified)}
+                <p className="font-medium truncate">{act.label || t("portal.unnamedDevice")}</p>
+                <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                  {act.seat_email && <>{act.seat_email} · </>}
+                  {t("portal.lastSeen", { date: formatDate(act.last_verified) })}
                 </p>
               </div>
               <Button
@@ -514,11 +517,10 @@ function EntitlementsSection({ entitlements }: { entitlements: Entitlement[] }) 
 
   return (
     <div className="space-y-2">
-      <p className="text-sm font-medium mb-2">{t("portal.featuresIncluded")}</p>
       {entitlements.map((ent) => (
-        <div key={ent.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2 text-sm">
+        <div key={ent.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
           <div className="flex items-center gap-2">
-            <Check className="h-4 w-4 text-emerald-600 shrink-0" />
+            <Check className="h-4 w-4 text-primary shrink-0" />
             <span className="font-medium">{ent.feature}</span>
           </div>
           <div className="text-muted-foreground text-xs">
@@ -598,27 +600,11 @@ function SeatsSection({ license }: { license: PortalLicense }) {
 
   return (
     <div className="space-y-3">
-      {isLicenseOwner && perSeat && (
-        <div className="flex items-center justify-between gap-3 flex-wrap bg-muted/50 rounded px-3 py-2 text-sm">
-          <div className="min-w-0">
-            <p className="font-medium">{t("portal.ownerSeatTitle")}</p>
-            <p className="text-xs text-muted-foreground">
-              {ownerHoldsSeat ? t("portal.ownerSeatHeld", { email: license.email }) : t("portal.ownerSeatReleased")}
-            </p>
-          </div>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={ownerSeatMut.isPending}
-            onClick={() => ownerSeatMut.mutate(ownerHoldsSeat)}
-          >
-            {ownerHoldsSeat ? t("portal.ownerSeatRelease") : t("portal.ownerSeatTake")}
-          </Button>
-        </div>
-      )}
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-medium">
-          {t("portal.teamMembers")} ({memberCount}/{maxSeats === 0 ? t("common.unlimitedSymbol") : maxSeats})
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          {maxSeats === 0
+            ? t("portal.seatsUsedUnlimited", { used: memberCount })
+            : t("portal.seatsUsed", { used: memberCount, max: maxSeats })}
         </p>
         {canManage && (
           <Button size="sm" disabled={atLimit} onClick={() => setShowInvite(true)}>
@@ -628,17 +614,39 @@ function SeatsSection({ license }: { license: PortalLicense }) {
       </div>
 
       {overLimit ? (
-        <p className="text-xs text-amber-700 dark:text-amber-400">{t("portal.seatsOverLimit")}</p>
+        <p className="text-sm text-destructive">{t("portal.seatsOverLimit")}</p>
       ) : canManage && atLimit ? (
         <p className="text-xs text-muted-foreground">{t("portal.seatLimit")}</p>
       ) : null}
 
+      {isLicenseOwner && perSeat && (
+        <div className="flex items-center justify-between gap-3 py-2.5 text-sm border-b">
+          <div className="min-w-0">
+            <p className="font-medium truncate">
+              {license.email} <span className="font-normal text-muted-foreground">· {t("portal.you")}</span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {ownerHoldsSeat ? t("portal.ownerSeatHeld") : t("portal.ownerSeatReleased")}
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="shrink-0"
+            disabled={ownerSeatMut.isPending}
+            onClick={() => ownerSeatMut.mutate(ownerHoldsSeat)}
+          >
+            {ownerHoldsSeat ? t("portal.ownerSeatRelease") : t("portal.ownerSeatTake")}
+          </Button>
+        </div>
+      )}
+
       {seatsQuery.isLoading ? (
         <div className="h-16 animate-pulse bg-muted rounded-lg" />
       ) : seats.length === 0 ? (
-        <p className="text-sm text-muted-foreground py-4 text-center">{t("portal.noMembers")}</p>
+        <p className="text-sm text-muted-foreground py-4">{t("portal.noMembers")}</p>
       ) : (
-        <div className="space-y-2">
+        <div className="divide-y">
           {seats.map((s) => (
             <SeatRow
               key={s.id}
@@ -690,21 +698,20 @@ function SeatRow({
   const { t } = useI18n()
   const accepted = !!seat.accepted_at
   return (
-    <div className="flex items-center justify-between bg-muted/50 rounded px-3 py-2 text-sm">
+    <div className="flex items-center justify-between gap-3 py-2.5 text-sm">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="font-medium truncate">{seat.email}</span>
-          <Badge variant="secondary" className="text-xs capitalize">
-            {seat.role === "admin" ? t("portal.roleAdmin") : t("portal.roleMember")}
-          </Badge>
-          {!accepted && (
-            <Badge variant="outline" className="text-xs">
-              {t("licenses.invited")}
+          {seat.role === "admin" && (
+            <Badge variant="secondary" className="text-xs">
+              {t("portal.roleAdmin")}
             </Badge>
           )}
         </div>
         <p className="text-xs text-muted-foreground mt-0.5">
-          {accepted ? `${t("portal.lastVerified")} ${formatDate(seat.accepted_at!)}` : formatDate(seat.invited_at)}
+          {accepted
+            ? t("portal.joinedOn", { date: formatDate(seat.accepted_at!) })
+            : t("portal.invitedOn", { date: formatDate(seat.invited_at) })}
         </p>
       </div>
       {canManage && (
@@ -797,15 +804,15 @@ function InviteSeatDialog({ license, onClose }: { license: PortalLicense; onClos
 }
 
 function QuotaUsageSection({ license }: { license: PortalLicense }) {
+  const { t } = useI18n()
   const quotaEntitlements = (license.plan?.entitlements || []).filter((e) => e.value_type === "quota")
 
   if (quotaEntitlements.length === 0) {
-    return <p className="text-sm text-muted-foreground py-4 text-center">No quota-based features.</p>
+    return <p className="text-sm text-muted-foreground py-4">{t("portal.noQuota")}</p>
   }
 
   return (
     <div className="space-y-4">
-      <p className="text-sm font-medium mb-2">Quota Usage</p>
       {quotaEntitlements.map((ent) => (
         <QuotaBar key={ent.id} entitlement={ent} licenseKey={license.license_key} />
       ))}
@@ -847,7 +854,7 @@ function QuotaBar({ entitlement, licenseKey }: { entitlement: Entitlement; licen
       </div>
       {entitlement.quota_unit && (
         <p className="text-xs text-muted-foreground">
-          {entitlement.quota_unit} per {entitlement.quota_period || "period"}
+          {entitlement.quota_unit} / {entitlement.quota_period || "period"}
         </p>
       )}
     </div>

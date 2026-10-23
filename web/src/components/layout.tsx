@@ -14,7 +14,6 @@ import {
   Rocket,
   ScrollText,
   Settings,
-  User,
   Users,
 } from "lucide-react"
 import { useState } from "react"
@@ -279,8 +278,8 @@ export function PortalLayout() {
   const { t } = useI18n()
 
   const portalNav = [
-    { to: "/portal", label: t("nav.licenses"), icon: Key },
-    { to: "/portal/account", label: t("nav.settings"), icon: User },
+    { to: "/portal", label: t("nav.licenses") },
+    { to: "/portal/account", label: t("portal.account") },
   ]
   const location = useLocation()
 
@@ -292,25 +291,43 @@ export function PortalLayout() {
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b bg-card">
-        <div className="max-w-5xl mx-auto flex items-center justify-between h-14 px-4">
-          <Link to="/portal" className="flex items-center gap-2 font-bold text-lg tracking-tight">
-            <img src={logo_url || "/logo.svg"} alt={site_name} className="h-6 w-6" />
+        <div className="max-w-5xl mx-auto flex items-center gap-6 h-14 px-4">
+          <Link to="/portal" className="flex items-center gap-2 font-semibold text-lg tracking-tight shrink-0">
+            <img src={logo_url || "/logo.svg"} alt="" className="h-6 w-6" />
             {site_name}
           </Link>
-          <div className="flex items-center gap-4">
+          <nav className="flex items-center gap-1 self-stretch" aria-label={site_name}>
+            {portalNav.map((item) => {
+              const active =
+                item.to === "/portal" ? location.pathname === "/portal" : location.pathname.startsWith(item.to)
+              return (
+                <Link
+                  key={item.to}
+                  to={item.to}
+                  aria-current={active ? "page" : undefined}
+                  className={cn(
+                    "flex items-center px-3 self-stretch text-sm font-medium border-b-2 -mb-px transition-colors",
+                    active
+                      ? "border-primary text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {item.label}
+                </Link>
+              )
+            })}
+          </nav>
+          <div className="ml-auto flex items-center gap-2">
             {user.is_admin && (
-              <Link to="/admin">
-                <Button variant="outline" size="sm">
-                  Admin Panel
-                </Button>
-              </Link>
+              <Button variant="ghost" size="sm" asChild>
+                <Link to="/admin">{t("nav.adminPanel")}</Link>
+              </Button>
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-2">
-                  <User className="h-4 w-4" />
-                  {user.name || user.email}
-                  <ChevronDown className="h-3 w-3 opacity-50" />
+                <Button variant="ghost" size="sm" className="gap-1.5 max-w-56">
+                  <span className="truncate">{user.name || user.email}</span>
+                  <ChevronDown className="h-3 w-3 opacity-50 shrink-0" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -322,30 +339,6 @@ export function PortalLayout() {
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-        </div>
-        {/* Portal navigation */}
-        <div className="max-w-5xl mx-auto px-4">
-          <nav className="flex gap-1 -mb-px">
-            {portalNav.map((item) => {
-              const active =
-                item.to === "/portal" ? location.pathname === "/portal" : location.pathname.startsWith(item.to)
-              return (
-                <Link key={item.to} to={item.to}>
-                  <div
-                    className={cn(
-                      "flex items-center gap-2 px-3 py-2 text-sm font-medium border-b-2 transition-colors",
-                      active
-                        ? "border-primary text-primary"
-                        : "border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/30",
-                    )}
-                  >
-                    <item.icon className="h-4 w-4" />
-                    {item.label}
-                  </div>
-                </Link>
-              )
-            })}
-          </nav>
         </div>
       </header>
       <main className="max-w-5xl mx-auto p-4 md:p-8">
