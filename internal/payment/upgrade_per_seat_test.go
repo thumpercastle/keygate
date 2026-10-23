@@ -139,3 +139,32 @@ func TestUpgrade_PerSeatCarriesQuantityAndRevertRestoresIt(t *testing.T) {
 		t.Fatalf("after the subscription ended: plan=%s quantity=%d, want the free plan with 1 seat", l.PlanID, l.Quantity)
 	}
 }
+
+// An upgrade never leaves a licence with fewer devices than it has: a
+// free licence that allows seven computers is not offered a plan that
+// allows one.
+func TestUpgradeTarget_RespectsDevices(t *testing.T) {
+	free7 := &model.Plan{ID: "free7", ProductID: "p", Active: true, LicenseType: "perpetual", MaxActivations: 7}
+	free1 := &model.Plan{ID: "free1", ProductID: "p", Active: true, LicenseType: "trial", MaxActivations: 1}
+	one := &model.Plan{ID: "one", ProductID: "p", Active: true, LicenseType: "subscription", StripePriceID: "price_1", MaxActivations: 1}
+	seven := &model.Plan{ID: "seven", ProductID: "p", Active: true, LicenseType: "subscription", StripePriceID: "price_7", MaxActivations: 7}
+	unlimited := &model.Plan{ID: "unl", ProductID: "p", Active: true, LicenseType: "subscription", StripePriceID: "price_u"}
+	perSeat := &model.Plan{ID: "seats", ProductID: "p", Active: true, LicenseType: "subscription", StripePriceID: "price_s",
+		PerSeat: true, MinQuantity: 1, MaxQuantity: 10, MaxActivations: 1, MaxSeats: 1}
+	for _, tt := range []struct {
+		from, to *model.Plan
+		want     bool
+	}{
+		{free7, one, false},
+		{free7, seven, true},
+		{free7, unlimited, true},
+		{free7, perSeat, false}, // starts at one seat, so one device
+		{free1, one, true},
+		{free1, perSeat, true},
+	} {
+		lic := &model.License{ProductID: "p", PlanID: tt.from.ID, Plan: tt.from, Quantity: 1}
+		if got := upgradeTarget(lic, tt.to); got != tt.want {
+			t.Errorf("%s → %s: upgradeTarget = %v, want %v", tt.from.ID, tt.to.ID, got, tt.want)
+		}
+	}
+}

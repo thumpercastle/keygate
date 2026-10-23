@@ -586,7 +586,7 @@ const zh = {
 
   // Portal
   "portal.devices": "设备",
-  "portal.unnamedDevice": "未命名设备",
+  "portal.unnamedDevice": "设备 {id}",
   "portal.lastSeen": "最后在线 {date}",
   "portal.seatsCount": "{count} 个席位",
   "portal.seatsUnlimited": "席位不限",

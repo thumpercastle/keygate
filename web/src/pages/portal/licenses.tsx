@@ -432,7 +432,9 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
             {embedded.map((act) => (
               <div key={act.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
                 <div className="min-w-0 flex-1">
-                  <p className="font-medium truncate">{act.label || t("portal.unnamedDevice")}</p>
+                  <p className="font-medium truncate">
+                    {act.label || t("portal.unnamedDevice", { id: deviceTag(act.identifier) })}
+                  </p>
                   <p className="text-xs text-muted-foreground mt-0.5 truncate">
                     {act.seat_email && <>{act.seat_email} · </>}
                     {t("portal.lastSeen", { date: formatDay(act.last_verified) })}
@@ -463,7 +465,9 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
           {activations.map((act) => (
             <div key={act.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
               <div className="min-w-0 flex-1">
-                <p className="font-medium truncate">{act.label || t("portal.unnamedDevice")}</p>
+                <p className="font-medium truncate">
+                  {act.label || t("portal.unnamedDevice", { id: deviceTag(act.identifier) })}
+                </p>
                 <p className="text-xs text-muted-foreground mt-0.5 truncate">
                   {act.seat_email && <>{act.seat_email} · </>}
                   {t("portal.lastSeen", { date: formatDay(act.last_verified) })}
@@ -505,6 +509,16 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
       </AlertDialog>
     </div>
   )
+}
+
+// deviceTag is a short, stable tag for a device that reported no name:
+// the last six characters of its identifier, enough to tell two
+// unnamed devices apart.
+function deviceTag(identifier: string): string {
+  return identifier
+    .replace(/[^A-Za-z0-9]/g, "")
+    .slice(-6)
+    .toUpperCase()
 }
 
 function EntitlementsSection({ entitlements }: { entitlements: Entitlement[] }) {

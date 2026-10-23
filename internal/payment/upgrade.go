@@ -102,7 +102,22 @@ func upgradeTarget(lic *model.License, plan *model.Plan) bool {
 	}
 	return plan.Active && plan.ProductID == lic.ProductID && plan.ID != lic.PlanID &&
 		plan.StripePriceID != "" && plan.LicenseType != "trial" &&
-		plan.InitialUpdatesUntil(time.Now()) == nil && seatsFit
+		plan.InitialUpdatesUntil(time.Now()) == nil && seatsFit && devicesFit(lic, plan)
+}
+
+// devicesFit reports whether plan, at the seats the upgrade would start
+// with, allows at least as many devices as lic does now. Paying should
+// never sign computers out.
+func devicesFit(lic *model.License, plan *model.Plan) bool {
+	if lic.Plan == nil {
+		return true
+	}
+	now := lic.EffectiveLimits().Activations
+	next := (&model.License{Plan: plan, Quantity: plan.ClampQuantity(lic.Quantity)}).EffectiveLimits().Activations
+	if now.Unlimited || next.Unlimited {
+		return next.Unlimited
+	}
+	return next.Value >= now.Value
 }
 
 // UpgradableLicenses reports which of the licences email owns can be

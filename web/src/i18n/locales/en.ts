@@ -607,7 +607,7 @@ const en = {
 
   // Portal
   "portal.devices": "Devices",
-  "portal.unnamedDevice": "Unnamed device",
+  "portal.unnamedDevice": "Device {id}",
   "portal.lastSeen": "Last seen {date}",
   "portal.seatsCount": "{count} seats",
   "portal.seatsUnlimited": "Unlimited seats",
