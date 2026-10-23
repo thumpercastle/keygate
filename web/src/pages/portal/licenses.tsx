@@ -245,7 +245,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
               {(hasBilling || keyUsable) && (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button size="sm" variant="outline" aria-label={t("portal.moreActions")}>
+                    <Button size="sm" variant="outline">
                       {hasBilling ? t("portal.billing") : t("portal.more")}
                       <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-60" />
                     </Button>
