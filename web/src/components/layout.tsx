@@ -14,6 +14,7 @@ import {
   Rocket,
   ScrollText,
   Settings,
+  User,
   Users,
 } from "lucide-react"
 import { useState } from "react"
@@ -291,10 +292,10 @@ export function PortalLayout() {
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b bg-card">
-        <div className="max-w-5xl mx-auto flex items-center gap-6 h-14 px-4">
+        <div className="max-w-5xl mx-auto flex items-center gap-3 sm:gap-6 h-14 px-4">
           <Link to="/portal" className="flex items-center gap-2 font-semibold text-lg tracking-tight shrink-0">
             <img src={logo_url || "/logo.svg"} alt="" className="h-6 w-6" />
-            {site_name}
+            <span className="hidden sm:inline">{site_name}</span>
           </Link>
           <nav className="flex items-center gap-1 self-stretch" aria-label={site_name}>
             {portalNav.map((item) => {
@@ -325,8 +326,9 @@ export function PortalLayout() {
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-1.5 max-w-56">
-                  <span className="truncate">{user.name || user.email}</span>
+                <Button variant="ghost" size="sm" className="gap-1.5 max-w-56" aria-label={user.email}>
+                  <User className="h-4 w-4 sm:hidden" />
+                  <span className="truncate hidden sm:inline">{user.name || user.email}</span>
                   <ChevronDown className="h-3 w-3 opacity-50 shrink-0" />
                 </Button>
               </DropdownMenuTrigger>

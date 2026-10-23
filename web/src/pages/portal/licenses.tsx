@@ -36,7 +36,7 @@ import {
   portal,
   type Seat,
 } from "@/lib/api"
-import { cn, formatDate, statusColor } from "@/lib/utils"
+import { cn, formatDate, formatDay, statusColor } from "@/lib/utils"
 
 export default function PortalLicensesPage() {
   const { t } = useI18n()
@@ -192,9 +192,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
       : t("portal.devicesCount", { count: deviceCount }),
   )
   if (lic.valid_until) {
-    summary.push(
-      t(hasSubscription && live ? "portal.renewsOn" : "portal.endsOn", { date: formatDate(lic.valid_until) }),
-    )
+    summary.push(t(hasSubscription && live ? "portal.renewsOn" : "portal.endsOn", { date: formatDay(lic.valid_until) }))
   } else if (!isPerpetualPlan) {
     summary.push(t("portal.noEndDate"))
   }
@@ -437,7 +435,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
                   <p className="font-medium truncate">{act.label || t("portal.unnamedDevice")}</p>
                   <p className="text-xs text-muted-foreground mt-0.5 truncate">
                     {act.seat_email && <>{act.seat_email} · </>}
-                    {t("portal.lastSeen", { date: formatDate(act.last_verified) })}
+                    {t("portal.lastSeen", { date: formatDay(act.last_verified) })}
                   </p>
                 </div>
               </div>
@@ -468,7 +466,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
                 <p className="font-medium truncate">{act.label || t("portal.unnamedDevice")}</p>
                 <p className="text-xs text-muted-foreground mt-0.5 truncate">
                   {act.seat_email && <>{act.seat_email} · </>}
-                  {t("portal.lastSeen", { date: formatDate(act.last_verified) })}
+                  {t("portal.lastSeen", { date: formatDay(act.last_verified) })}
                 </p>
               </div>
               <Button
@@ -710,8 +708,8 @@ function SeatRow({
         </div>
         <p className="text-xs text-muted-foreground mt-0.5">
           {accepted
-            ? t("portal.joinedOn", { date: formatDate(seat.accepted_at!) })
-            : t("portal.invitedOn", { date: formatDate(seat.invited_at) })}
+            ? t("portal.joinedOn", { date: formatDay(seat.accepted_at!) })
+            : t("portal.invitedOn", { date: formatDay(seat.invited_at) })}
         </p>
       </div>
       {canManage && (
@@ -739,7 +737,7 @@ function InviteSeatDialog({ license, onClose }: { license: PortalLicense; onClos
   const inviteMut = useMutation({
     mutationFn: () => portal.addSeat({ license_key: license.license_key, email: email.trim(), role }),
     onSuccess: () => {
-      showToast(t("licenses.seatInviteSent"))
+      showToast(t("licenses.seatInviteSent"), "success")
       qc.invalidateQueries({ queryKey: ["portal", "seats", license.id] })
       onClose()
     },

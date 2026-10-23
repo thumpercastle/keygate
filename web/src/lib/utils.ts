@@ -30,6 +30,17 @@ export function formatDate(
   })
 }
 
+// formatDay is a calendar date with no clock time ("23 Oct 2026"), for
+// dates a person reads as a day: joined, invited, renews, last seen.
+export function formatDay(date: string | Date | null | undefined, options?: { locale?: string }): string {
+  if (!date) return "-"
+  return new Date(date).toLocaleDateString(options?.locale || dateLocale(), {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  })
+}
+
 export function boolColor(active: boolean): string {
   return active ? "bg-emerald-100 text-emerald-800" : "bg-gray-100 text-gray-800"
 }
