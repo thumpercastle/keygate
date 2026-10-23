@@ -110,6 +110,10 @@ const FORM_KEYS = [
   "signup_mode",
   "brand_color",
   "logo_url",
+  "favicon_url",
+  "font_stylesheet_url",
+  "font_family",
+  "theme_tokens",
   "maintenance_features_enabled",
   "email_provider",
   "smtp_from",
@@ -364,6 +368,50 @@ export default function SettingsPage() {
                     />
                   </div>
                   <p className="text-xs text-muted-foreground">{t("settings.logoUrlDesc")}</p>
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label>{t("settings.faviconUrl")}</Label>
+                  <div className="flex items-center gap-3">
+                    {form.favicon_url && <img src={form.favicon_url} alt="" className="h-8 w-8 rounded border" />}
+                    <Input
+                      value={form.favicon_url || ""}
+                      onChange={(e) => set("favicon_url", e.target.value)}
+                      placeholder="/brand/icon.svg"
+                      className="flex-1"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t("settings.faviconUrlDesc")}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("settings.fontFamily")}</Label>
+                  <Input
+                    value={form.font_family || ""}
+                    onChange={(e) => set("font_family", e.target.value)}
+                    placeholder={'"Inter", "Segoe UI", sans-serif'}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("settings.fontFamilyDesc")}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("settings.fontStylesheetUrl")}</Label>
+                  <Input
+                    value={form.font_stylesheet_url || ""}
+                    onChange={(e) => set("font_stylesheet_url", e.target.value)}
+                    placeholder="/brand/fonts.css"
+                  />
+                  <p className="text-xs text-muted-foreground">{t("settings.fontStylesheetUrlDesc")}</p>
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="theme-tokens">{t("settings.themeTokens")}</Label>
+                  <textarea
+                    id="theme-tokens"
+                    value={form.theme_tokens || ""}
+                    onChange={(e) => set("theme_tokens", e.target.value)}
+                    rows={8}
+                    spellCheck={false}
+                    placeholder={"--color-primary: #4f46e5;\n--radius-lg: 0.5rem;"}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
+                  />
+                  <p className="text-xs text-muted-foreground">{t("settings.themeTokensDesc")}</p>
                 </div>
               </div>
             </CardContent>

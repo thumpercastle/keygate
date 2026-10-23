@@ -17,6 +17,9 @@ type Config struct {
 	Port        string
 	Environment string
 	BaseURL     string
+	// BrandDir is a folder of logo, icon and font files served at
+	// /brand/ (BRAND_DIR). Empty serves nothing there.
+	BrandDir string
 
 	DatabaseURL string
 
@@ -117,6 +120,7 @@ func Load() (*Config, error) {
 		Port:        envOr("PORT", "9000"),
 		Environment: envOr("ENVIRONMENT", "development"),
 		BaseURL:     envOr("BASE_URL", "http://localhost:9000"),
+		BrandDir:    os.Getenv("BRAND_DIR"),
 
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 

@@ -256,8 +256,8 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 			lineItem.AdjustableQuantity = adjustableQuantity(plan)
 		}
 		params := &stripe.CheckoutSessionParams{
-			Mode:      stripe.String(string(mode)),
-			LineItems: []*stripe.CheckoutSessionLineItemParams{lineItem},
+			Mode:                stripe.String(string(mode)),
+			LineItems:           []*stripe.CheckoutSessionLineItemParams{lineItem},
 			SuccessURL:          stripe.String(h.BaseURL + "/checkout/success?session_id={CHECKOUT_SESSION_ID}"),
 			CancelURL:           stripe.String(h.BaseURL + "/portal"),
 			AllowPromotionCodes: stripe.Bool(true),

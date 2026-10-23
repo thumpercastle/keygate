@@ -14,6 +14,7 @@ import (
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
+	"regexp"
 	"strings"
 	"time"
 
@@ -990,7 +991,7 @@ func (s *EmailService) SendPaymentActionRequired(to, productName, invoiceURL str
 <html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
 <h2 style="color: #d97706;">Payment Authentication Required</h2>
 <p>Your payment for <strong>` + productName + `</strong> requires additional authentication.</p>
-<p><a href="` + invoiceURL + `" style="display:inline-block;background:#2563eb;color:white;padding:10px 24px;border-radius:6px;text-decoration:none;">Complete Payment</a></p>
+<p><a href="` + invoiceURL + `" style="display:inline-block;background:` + s.buttonColour("#2563eb") + `;color:white;padding:10px 24px;border-radius:6px;text-decoration:none;">Complete Payment</a></p>
 <p style="color:#666;font-size:14px;">If you don't complete this step, your subscription may be interrupted.</p>
 </body></html>`
 	go func() {
@@ -1255,3 +1256,20 @@ const tmplTrialExpired = `<!DOCTYPE html>
 <p>Your <strong>{{.Product}}</strong> trial has ended.</p>
 <p>Subscribe to a paid plan to continue using all features.</p>
 </body></html>`
+
+// hexColour is the only shape of brand_color that reaches a mail.
+var hexColour = regexp.MustCompile(`^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
+
+// buttonColour is the site's brand colour for email buttons, or
+// fallback when none is set (or the store holds something that is not
+// a hex colour, which never reaches the markup).
+func (e *EmailService) buttonColour(fallback string) string {
+	if e.store == nil {
+		return fallback
+	}
+	c, err := e.store.GetSetting(context.Background(), "brand_color")
+	if err != nil || !hexColour.MatchString(c) {
+		return fallback
+	}
+	return c
+}

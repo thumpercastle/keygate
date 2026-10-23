@@ -4280,6 +4280,7 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 // else is rejected so a typo can't quietly create a dead row.
 var settingsWritable = map[string]bool{
 	"site_name": true, "timezone": true, "language": true, "brand_color": true, "logo_url": true,
+	"favicon_url": true, "font_stylesheet_url": true, "font_family": true, "theme_tokens": true,
 	"signup_mode":                      true,
 	service.ReminderDaysSetting:        true,
 	"maintenance_features_enabled":     true,
@@ -4451,6 +4452,14 @@ func (h *AdminHandler) validateEmailProvider(c *gin.Context, provider string, wr
 // picker writes.
 var brandColorPattern = regexp.MustCompile(`^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
+// fontFamilyPattern is a CSS font-family list: names, quoted or not.
+var fontFamilyPattern = regexp.MustCompile(`^[A-Za-z0-9 ,'"_-]{1,200}$`)
+
+// themeTokenPattern is one CSS custom property with an inert value:
+// colours, lengths, shadows and font lists, never url(), a selector or
+// markup. The page sets each one on :root.
+var themeTokenPattern = regexp.MustCompile(`^\s*--[a-z0-9-]{1,64}\s*:\s*[A-Za-z0-9#%.,/() '"+-]{1,200};?\s*$`)
+
 // brandingProblem checks the branding settings that public /config hands
 // to every page: the logo must be an http(s) URL or a path on this site,
 // and the colour a hex value. Empty clears either. It returns the reason
@@ -4460,12 +4469,26 @@ func brandingProblem(key, val string) string {
 		return ""
 	}
 	switch key {
-	case "logo_url":
+	case "logo_url", "favicon_url", "font_stylesheet_url":
 		if strings.HasPrefix(val, "/") && !strings.HasPrefix(val, "//") && len(val) <= 2048 {
 			return ""
 		}
-		if err := apperr.ValidateHTTPURL("logo_url", val); err != nil {
-			return "logo_url must be a full http(s) URL or a path starting with /"
+		if err := apperr.ValidateHTTPURL(key, val); err != nil {
+			return key + " must be a full http(s) URL or a path starting with /"
+		}
+	case "font_family":
+		if !fontFamilyPattern.MatchString(val) {
+			return "font_family must be a comma-separated list of font names"
+		}
+	case "theme_tokens":
+		lines := strings.Split(val, "\n")
+		if len(lines) > 200 {
+			return "theme_tokens is limited to 200 lines"
+		}
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" && !themeTokenPattern.MatchString(line) {
+				return "each theme_tokens line must be a CSS custom property, such as --color-primary: #4f46e5;"
+			}
 		}
 	case "brand_color":
 		if !brandColorPattern.MatchString(val) {

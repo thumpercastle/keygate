@@ -42,7 +42,7 @@ func TestServeFrontend(t *testing.T) {
 
 	r := gin.New()
 	r.GET("/api/v1/health", func(c *gin.Context) { c.String(http.StatusOK, "api") })
-	serveFrontend(r)
+	serveFrontend(r, func() brandShell { return brandShell{} })
 
 	get := func(path string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()

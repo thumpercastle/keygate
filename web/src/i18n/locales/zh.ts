@@ -406,6 +406,15 @@ const zh = {
   "settings.brandColorDesc": "整个界面使用的主色调。留空则使用默认紫色。",
   "settings.logoUrl": "自定义 Logo URL",
   "settings.logoUrlDesc": "Logo 图片的 URL（推荐 SVG 格式）。留空则使用默认 Keygate Logo。",
+  "settings.faviconUrl": "浏览器标签图标 URL",
+  "settings.faviconUrlDesc": "用于浏览器标签和书签的方形图标。留空则使用 Logo。",
+  "settings.fontFamily": "字体",
+  "settings.fontFamilyDesc": "整个界面使用的 CSS 字体列表。留空则使用系统字体。",
+  "settings.fontStylesheetUrl": "字体样式表 URL",
+  "settings.fontStylesheetUrlDesc":
+    "包含该字体 @font-face 规则的样式表。使用本站路径（/brand/…）可在严格的内容安全策略下加载。",
+  "settings.themeTokens": "主题变量",
+  "settings.themeTokensDesc": "每行一个 CSS 自定义属性，例如 --color-primary: #4f46e5; 仅限颜色、圆角和阴影。",
   "settings.emailConfigured": "外发邮件已配置。",
   "settings.emailNotConfigured": "外发邮件未配置，客户不会收到授权和邀请邮件。",
   "settings.emailEnvHint":

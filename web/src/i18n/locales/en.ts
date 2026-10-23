@@ -416,6 +416,17 @@ const en = {
   "settings.brandColorDesc": "Primary color used throughout the interface. Leave empty for default.",
   "settings.logoUrl": "Custom Logo URL",
   "settings.logoUrlDesc": "URL to your logo (SVG recommended). Leave empty for default Keygate logo.",
+  "settings.faviconUrl": "Browser Tab Icon URL",
+  "settings.faviconUrlDesc": "Square icon for browser tabs and bookmarks. Leave empty to use the logo.",
+  "settings.fontFamily": "Font",
+  "settings.fontFamilyDesc":
+    'CSS font list for the whole interface, e.g. "Inter", sans-serif. Leave empty for the system font.',
+  "settings.fontStylesheetUrl": "Font Stylesheet URL",
+  "settings.fontStylesheetUrlDesc":
+    "Stylesheet with the @font-face rules for that font. A path on this site (/brand/…) works under a strict content security policy.",
+  "settings.themeTokens": "Theme Tokens",
+  "settings.themeTokensDesc":
+    "One CSS custom property per line, e.g. --color-primary: #4f46e5; — colours, radii and shadows only.",
   "settings.emailConfigured": "Outgoing email is configured.",
   "settings.emailNotConfigured":
     "Outgoing email is not configured — customers will not receive license or invite emails.",

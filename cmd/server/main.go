@@ -1460,7 +1460,15 @@ func main() {
 
 	}
 
-	serveFrontend(r)
+	if cfg.BrandDir != "" {
+		r.GET("/brand/*file", brandFileHandler(cfg.BrandDir))
+	}
+	serveFrontend(r, cachedBrandShell(30*time.Second, func() map[string]string {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		s, _ := db.GetPublicSettings(ctx)
+		return s
+	}))
 
 	// Anything that reaches the router without matching a route. Gin's
 	// built-in answer is the string "404 page not found" as
@@ -1575,7 +1583,7 @@ func newLogger(w io.Writer) *slog.Logger {
 }
 
 // serveFrontend serves the React SPA from web/dist if it exists.
-func serveFrontend(r *gin.Engine) {
+func serveFrontend(r *gin.Engine, shell func() brandShell) {
 	distPath := "web/dist"
 	if _, err := os.Stat(distPath); os.IsNotExist(err) {
 		return
@@ -1591,7 +1599,7 @@ func serveFrontend(r *gin.Engine) {
 		path := c.Request.URL.Path
 
 		// Let backend routes pass through.
-		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/pay/") || path == "/health" || path == "/metrics" || path == "/docs" || strings.HasPrefix(path, "/docs/") {
+		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/pay/") || strings.HasPrefix(path, "/brand/") || path == "/health" || path == "/metrics" || path == "/docs" || strings.HasPrefix(path, "/docs/") {
 			c.Next()
 			return
 		}
@@ -1638,7 +1646,7 @@ func serveFrontend(r *gin.Engine) {
 		// cache across a deploy; what it points at may be cached
 		// forever.
 		c.Header("Cache-Control", "no-cache")
-		c.Data(http.StatusOK, "text/html; charset=utf-8", html)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", brandIndexHTML(html, shell()))
 		c.Abort()
 	})
 }

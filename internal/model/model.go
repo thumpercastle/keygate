@@ -922,9 +922,7 @@ type LicenseUpgrade struct {
 	FromPaymentProvider     string     `bun:",notnull,default:''" json:"from_payment_provider,omitempty"`
 	FromStripeCustomerID    string     `bun:",notnull,default:''" json:"from_stripe_customer_id,omitempty"`
 	FromCanceledAt          *time.Time `json:"from_canceled_at,omitempty"`
-	// FromQuantity is the licence's seat count before the upgrade, put
-	// back if it reverts.
-	FromQuantity            int        `bun:",notnull,default:1" json:"from_quantity"`
+	FromQuantity            int        `bun:",notnull,default:1" json:"from_quantity"` // seats before; restored on revert
 	EndReason               string     `bun:",notnull,default:''" json:"end_reason,omitempty"`
 	CreatedAt               time.Time  `bun:",nullzero,default:now()" json:"created_at"`
 	AppliedAt               *time.Time `json:"applied_at,omitempty"`

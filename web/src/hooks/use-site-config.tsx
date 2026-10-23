@@ -5,6 +5,7 @@ interface SiteConfig {
   site_name: string
   brand_color: string
   logo_url: string
+  favicon_url: string
   timezone: string
   language: string
   attribution_text: string
@@ -16,6 +17,7 @@ const defaults: SiteConfig = {
   site_name: "Keygate",
   brand_color: "",
   logo_url: "",
+  favicon_url: "",
   timezone: "UTC",
   language: "",
   attribution_text: "Powered by Keygate",
@@ -36,6 +38,7 @@ export function SiteConfigProvider({ children }: { children: ReactNode }) {
           site_name: data.site_name || "Keygate",
           brand_color: data.brand_color || "",
           logo_url: data.logo_url || "",
+          favicon_url: data.favicon_url || data.logo_url || "",
           timezone: data.timezone || "UTC",
           language: data.language || "",
           attribution_text: data.attribution_text || "Powered by Keygate",
@@ -47,13 +50,32 @@ export function SiteConfigProvider({ children }: { children: ReactNode }) {
         // favorite (often the sizes="32x32" one), so rewriting only
         // the first link never visibly changed the tab icon — update
         // them all.
-        if (data.logo_url) {
+        const icon = data.favicon_url || data.logo_url
+        if (icon) {
           document.querySelectorAll<HTMLLinkElement>("link[rel~='icon']").forEach((link) => {
-            link.href = data.logo_url
+            link.href = icon
           })
         }
+        const root = document.documentElement.style
         if (data.brand_color) {
-          document.documentElement.style.setProperty("--color-primary", data.brand_color)
+          root.setProperty("--color-primary", data.brand_color)
+          root.setProperty("--color-ring", data.brand_color)
+        }
+        if (data.font_stylesheet_url && !document.getElementById("site-font-stylesheet")) {
+          const link = document.createElement("link")
+          link.id = "site-font-stylesheet"
+          link.rel = "stylesheet"
+          link.href = data.font_stylesheet_url
+          document.head.appendChild(link)
+        }
+        if (data.font_family) {
+          root.setProperty("--font-sans", data.font_family)
+        }
+        // Theme tokens restyle the whole interface: one CSS custom
+        // property per line, validated by the server when saved.
+        for (const line of (data.theme_tokens || "").split("\n")) {
+          const m = line.match(/^\s*(--[a-z0-9-]+)\s*:\s*(.+?);?\s*$/)
+          if (m) root.setProperty(m[1], m[2])
         }
         if (data.site_name) {
           document.title = data.site_name

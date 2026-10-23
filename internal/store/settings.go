@@ -202,11 +202,27 @@ func (s *Store) GetSettings(ctx context.Context) (map[string]string, error) {
 }
 
 // GetPublicSettings returns settings safe for unauthenticated access (site branding).
+// publicSettingKeys are served to anyone by /config: the site's name,
+// locale and look.
+var publicSettingKeys = []string{
+	"site_name", "timezone", "brand_color", "language", "logo_url",
+	"favicon_url", "font_stylesheet_url", "font_family", "theme_tokens",
+}
+
+// IsPublicSetting reports whether /config serves key.
+func IsPublicSetting(key string) bool {
+	for _, k := range publicSettingKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) GetPublicSettings(ctx context.Context) (map[string]string, error) {
-	publicKeys := []string{"site_name", "timezone", "brand_color", "language", "logo_url"}
 	var settings []Setting
 	err := s.DB.NewSelect().Model(&settings).
-		Where("key IN (?)", bun.List(publicKeys)).Scan(ctx)
+		Where("key IN (?)", bun.List(publicSettingKeys)).Scan(ctx)
 	if err != nil {
 		return nil, err
 	}

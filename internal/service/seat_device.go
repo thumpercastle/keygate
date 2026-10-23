@@ -641,7 +641,7 @@ func (e *EmailService) SendDesktopSignin(to, productName, deviceLabel, link stri
 <html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
 <h2>Sign in to ` + html.EscapeString(productName) + `</h2>
 <p>Someone asked to sign in to ` + html.EscapeString(productName) + ` on <strong>` + device + `</strong> with this email address.</p>
-<p><a href="` + html.EscapeString(link) + `" style="display:inline-block;background:#18181b;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;">Open the sign-in page</a></p>
+<p><a href="` + html.EscapeString(link) + `" style="display:inline-block;background:` + e.buttonColour("#18181b") + `;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;">Open the sign-in page</a></p>
 <p style="color: #666; font-size: 14px;">The link expires in 15 minutes. Signing in on a new computer signs you out of your previous one. If you didn't ask for this, ignore this email.</p>
 </body></html>`
 	go func() {
