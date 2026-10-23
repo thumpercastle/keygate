@@ -158,8 +158,9 @@ func TestFeedCutoff_MaintenancePeriod(t *testing.T) {
 	if err := s.CreatePlan(ctx, plan); err != nil {
 		t.Fatal(err)
 	}
-	// PostgreSQL stores timestamps with microsecond precision. Match that
-	// precision so the exact cutoff equality assertion below is stable.
+	// Postgres keeps microseconds; Linux clocks give nanoseconds, so an
+	// untruncated cutoff almost never compares Equal to the value read
+	// back, which is cut to the microsecond on the way in.
 	cutoff := time.Now().Add(-10 * 24 * time.Hour).Truncate(time.Microsecond)
 	for _, v := range []struct {
 		version string

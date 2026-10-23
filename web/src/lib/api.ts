@@ -7,6 +7,11 @@ const BASE = `${import.meta.env.VITE_API_URL || ""}/api/v1`
 // auth layer retries instead (see AuthProvider).
 export class ServiceUnavailableError extends Error {}
 
+// errorCode reads the server's error code from a failed request, if any.
+export function errorCode(err: unknown): string | undefined {
+  return (err as { code?: string } | null)?.code
+}
+
 type RefreshOutcome = "ok" | "denied" | "unavailable"
 
 // The session cookie lives 24 hours; the refresh cookie 30 days. When a
@@ -51,7 +56,10 @@ async function request<T>(path: string, opts?: RequestInit, retried = false): Pr
   // is the exception: it needs a live session to revoke the refresh
   // token, and if it fails the login page would silently renew the
   // session and sign the user straight back in.
-  const renewable = !path.startsWith("/auth/") || path === "/auth/logout"
+  // The sign-up form answers 401 for a wrong code, not for a session: it
+  // keeps its own error and is never renewed or sent to the login page.
+  const signup = path.startsWith("/signup/")
+  const renewable = (!path.startsWith("/auth/") && !signup) || path === "/auth/logout"
   if (res.status === 401 && !retried && renewable) {
     const outcome = await refreshSession()
     if (outcome === "ok") return request<T>(path, opts, true)
@@ -62,7 +70,7 @@ async function request<T>(path: string, opts?: RequestInit, retried = false): Pr
   }
 
   // Could not renew: redirect to login
-  if (res.status === 401) {
+  if (res.status === 401 && !signup) {
     // Don't redirect if already on login page or fetching auth state
     if (!window.location.pathname.startsWith("/login") && path !== "/portal/me") {
       window.location.href = "/login"
@@ -94,7 +102,9 @@ async function request<T>(path: string, opts?: RequestInit, retried = false): Pr
       `Request failed (${res.status}${res.statusText ? ` ${res.statusText}` : ""})`
     // A 429 or 5xx says nothing about the session: the server is busy or
     // failing. Callers that decide "signed in or not" must tell it apart.
-    throw res.status === 429 || res.status >= 500 ? new ServiceUnavailableError(msg) : new Error(msg)
+    // The server's error code rides along for callers that translate it.
+    const err = res.status === 429 || res.status >= 500 ? new ServiceUnavailableError(msg) : new Error(msg)
+    throw Object.assign(err, { code: typeof json?.error?.code === "string" ? json.error.code : undefined })
   }
   return (json?.data !== undefined ? json.data : json) as T
 }
@@ -122,7 +132,8 @@ export const site = {
 }
 
 // ─── Auth ───
-// First run setup. Public: the server refuses initialize once an owner exists.
+// First run setup. Public: the server refuses initialize once an owner, an
+// admin or a product exists.
 export const setup = {
   status: () => get<{ needed: boolean; step: string }>("/setup/status"),
   initialize: (body: {
@@ -147,6 +158,35 @@ export const auth = {
       email,
       code,
     }),
+}
+
+// ─── Self sign-up (public) ───
+// A free plan's /pay link leads to /signup/:checkoutId when the plan
+// takes self sign-ups. verify signs the visitor in and emails the key.
+export interface SignupInfo {
+  product_name: string
+  plan_name: string
+  license_type: string
+  trial_days: number
+  consent_text: string
+}
+
+export const signup = {
+  info: (checkoutId: string) => get<SignupInfo>(`/signup/${encodeURIComponent(checkoutId)}`),
+  send: (checkoutId: string, email: string) =>
+    post<{ status: string }>(`/signup/${encodeURIComponent(checkoutId)}/send`, { email }),
+  // consentText is the wording the form showed; the server records a
+  // yes only against the wording it holds now.
+  verify: (checkoutId: string, email: string, code: string, marketingConsent: boolean, consentText: string) =>
+    post<{ status: "created" | "existing"; license_id: string; license_status?: string; license_usable?: boolean }>(
+      `/signup/${encodeURIComponent(checkoutId)}/verify`,
+      {
+        email,
+        code,
+        marketing_consent: marketingConsent,
+        consent_text: consentText,
+      },
+    ),
 }
 
 // ─── Checkout ───
@@ -216,7 +256,7 @@ export const portal = {
   // Owner only: give up (or take back) the owner's own seat.
   setOwnerSeat: (data: { license_id: string; released: boolean }) =>
     post<{ owner_seat_released: boolean }>("/portal/licenses/owner-seat", data),
-  changePlan: (data: { license_id: string; new_price_id: string; prorate?: boolean }) =>
+  changePlan: (data: { license_id: string; new_price_id: string }) =>
     post<{ status: string; new_plan_id: string; new_plan_name: string; proration: string }>(
       "/portal/subscription/change-plan",
       data,
@@ -228,6 +268,9 @@ export const portal = {
   getInvoices: (licenseId: string) =>
     get<{ invoices: Invoice[] }>(`/portal/subscription/invoices?license_id=${licenseId}`),
   renewUpdates: (data: { license_id: string }) => post<{ url: string }>("/portal/updates/renew", data),
+  // Moves a licence Stripe doesn't bill (a free plan's) to a paid plan
+  // through checkout; the licence keeps its key.
+  upgrade: (data: { license_id: string; plan_id: string }) => post<{ url: string }>("/portal/licenses/upgrade", data),
 }
 
 // ─── Admin ───
@@ -646,6 +689,11 @@ export interface Plan {
   license_model?: string
   floating_timeout?: number
   token_ttl_days?: number
+  // Self sign-up (free plans only): visitors claim a licence from the
+  // plan's /pay link by confirming their email.
+  self_signup?: boolean
+  signup_daily_cap?: number
+  signup_consent_text?: string
   max_seats: number
   per_seat: boolean
   min_quantity: number
@@ -713,6 +761,10 @@ export interface License {
   external_workspace_id?: string
   // The owner administers without occupying a seat.
   owner_seat_released?: boolean
+  // Set on a licence the customer claimed through self sign-up.
+  signup_source?: string
+  marketing_consent?: boolean
+  marketing_consent_at?: string
   created_at: string
   updated_at: string
   product?: Product
@@ -736,6 +788,8 @@ export interface License {
 // Admin payloads never carry it.
 export interface PortalLicense extends License {
   license_key: string
+  // The owner can upgrade it to a paid plan now, keeping the key.
+  upgradable?: boolean
 }
 
 export interface Activation {

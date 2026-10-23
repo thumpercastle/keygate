@@ -27,6 +27,7 @@ import LoginPage from "@/pages/login"
 import PortalAccountPage from "@/pages/portal/account"
 import PortalLicensesPage from "@/pages/portal/licenses"
 import SetupPage from "@/pages/setup"
+import SignupPage from "@/pages/signup"
 import "./index.css"
 
 const queryClient = new QueryClient({
@@ -56,6 +57,7 @@ createRoot(document.getElementById("root")!).render(
                     <Route path="/checkout/success" element={<CheckoutSuccessPage />} />
                     <Route path="/accept-invite" element={<AcceptInvitePage />} />
                     <Route path="/desktop-signin" element={<DesktopSigninPage />} />
+                    <Route path="/signup/:checkoutId" element={<SignupPage />} />
 
                     {/* Admin */}
                     <Route path="/admin" element={<AdminLayout />}>

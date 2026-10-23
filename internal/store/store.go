@@ -33,6 +33,8 @@ type Store struct {
 	// feedTTL is how long this install signs the presigned links
 	// inside a public feed for; see SetFeedURLTTL.
 	feedTTL time.Duration
+	// dsn opens the pool RunMigrations uses; see migrationDB.
+	dsn string
 }
 
 func New(dsn string) (*Store, error) {
@@ -46,10 +48,43 @@ func New(dsn string) (*Store, error) {
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &Store{DB: db}, nil
+	return &Store{DB: db, dsn: dsn}, nil
 }
 
 func (s *Store) Close() error { return s.DB.Close() }
+
+const (
+	// migrationLockWait is how long RunMigrations waits for another
+	// instance to finish its migrations before giving up.
+	migrationLockWait = 10 * time.Minute
+	// migrationTimeout bounds each statement of a migration, and with
+	// migrationGrace the whole of one migration file.
+	migrationTimeout = 5 * time.Minute
+	// migrationGrace is how much longer the client waits than the server
+	// is told to, so the server's own timeout ends a statement or a lock
+	// wait first. A client deadline does not end it: the driver only
+	// closes its socket, and the backend runs on, or stays queued for the
+	// lock, after the client has given up.
+	migrationGrace = 30 * time.Second
+)
+
+// migrationDB opens the connection RunMigrations holds its lock and
+// applies migrations on. The driver bounds every read, at 10 seconds by
+// default, deadline or not, which the store's pool keeps for ordinary
+// queries; here it would fail any migration longer than that, an index
+// on a large table say, and any wait for another instance's run. This
+// one waits as long as the longest of those, so that a read that never
+// returns, a COMMIT say, still ends; lock_timeout, statement_timeout and
+// the contexts RunMigrations sets are what end the rest.
+func (s *Store) migrationDB() (*bun.DB, error) {
+	if s.dsn == "" {
+		return nil, errors.New("run migrations: store not opened with New")
+	}
+	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(s.dsn),
+		pgdriver.WithReadTimeout(migrationLockWait+migrationGrace)))
+	sqldb.SetMaxOpenConns(1)
+	return bun.NewDB(sqldb, pgdialect.New()), nil
+}
 
 // RunMigrations executes all .up.sql files from the migrations directory in order.
 // Guarantees:
@@ -78,11 +113,52 @@ func (s *Store) RunMigrations(dir string) error {
 
 	// Acquire advisory lock to prevent concurrent migration across instances.
 	// Lock ID 7367616 = crc32("keygate_migrations") — unique per application.
-	if _, err := s.DB.ExecContext(ctx, "SELECT pg_advisory_lock(7367616)"); err != nil {
+	// The lock belongs to a session, so it is taken, held and released on
+	// one pinned connection, and the migrations run on that connection
+	// too. Through the pool, the lock lived on whichever connection ran
+	// the statement: the pool closes a connection that outlives
+	// ConnMaxLifetime, which dropped the lock partway through a long run,
+	// and an unlock could land on another connection, leaving the lock
+	// held by an idle one. Running the migrations on the lock's session
+	// means the lock cannot end while one still runs: a session the
+	// server ends (idle_session_timeout, a dropped connection) ends the
+	// migration with it, and a migration whose client gave up keeps the
+	// lock until its backend has finished.
+	mdb, err := s.migrationDB()
+	if err != nil {
+		return err
+	}
+	defer mdb.Close()
+	// The context covers connecting too, which the pool leaves unbounded.
+	lockCtx, cancelLock := context.WithTimeout(ctx, migrationLockWait+migrationGrace)
+	defer cancelLock()
+	lockConn, err := mdb.Conn(lockCtx)
+	if err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer lockConn.Close()
+	// lock_timeout alone bounds the wait: a statement_timeout set for the
+	// role or database would otherwise cut it short.
+	if _, err := lockConn.ExecContext(lockCtx, fmt.Sprintf("SET lock_timeout = %d; SET statement_timeout = 0", migrationLockWait.Milliseconds())); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	if _, err := lockConn.ExecContext(lockCtx, "SELECT pg_advisory_lock(7367616)"); err != nil {
+		if isLockTimeout(err) {
+			return fmt.Errorf("acquire migration lock: another instance has been migrating for over %v: %w", migrationLockWait, err)
+		}
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	defer func() {
-		_, _ = s.DB.ExecContext(ctx, "SELECT pg_advisory_unlock(7367616)")
+		unlockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		var released bool
+		if err := lockConn.NewRaw("SELECT pg_advisory_unlock(7367616)").Scan(unlockCtx, &released); err != nil {
+			slog.Warn("release migration lock", "error", err)
+		} else if !released {
+			// Another session answered, as behind a pooler in transaction
+			// mode, which session locks do not survive.
+			slog.Warn("release migration lock: not held by this session")
+		}
 	}()
 
 	// Verify checksums of previously applied migrations
@@ -90,7 +166,11 @@ func (s *Store) RunMigrations(dir string) error {
 		Filename string `bun:"filename"`
 		Checksum string `bun:"checksum"`
 	}
-	_ = s.DB.NewRaw("SELECT filename, checksum FROM schema_migrations ORDER BY filename").Scan(ctx, &existing)
+	// A failed read must not pass for "none applied", which would run
+	// every migration again.
+	if err := s.DB.NewRaw("SELECT filename, checksum FROM schema_migrations ORDER BY filename").Scan(ctx, &existing); err != nil {
+		return fmt.Errorf("read applied migrations: %w", err)
+	}
 	checksumMap := make(map[string]string, len(existing))
 	for _, e := range existing {
 		checksumMap[e.Filename] = e.Checksum
@@ -121,10 +201,15 @@ func (s *Store) RunMigrations(dir string) error {
 		}
 
 		// Apply migration: SQL execution + tracking record in ONE transaction
-		migCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		migCtx, cancel := context.WithTimeout(ctx, migrationTimeout+migrationGrace)
 
-		tx, err := s.DB.BeginTx(migCtx, nil)
+		tx, err := lockConn.BeginTx(migCtx, nil)
 		if err != nil {
+			cancel()
+			return fmt.Errorf("begin tx for %s: %w", entry.Name(), err)
+		}
+		if _, err := tx.ExecContext(migCtx, fmt.Sprintf("SET LOCAL statement_timeout = %d", migrationTimeout.Milliseconds())); err != nil {
+			_ = tx.Rollback()
 			cancel()
 			return fmt.Errorf("begin tx for %s: %w", entry.Name(), err)
 		}
@@ -316,25 +401,15 @@ func (s *Store) ListAdmins(ctx context.Context, p Page) ([]*model.User, int, err
 	return out, total, nil
 }
 
-// SetUserRole updates a user's role. Only owners can promote/demote.
-func (s *Store) SetUserRole(ctx context.Context, userID, role string) error {
-	if role != model.RoleOwner && role != model.RoleAdmin && role != model.RoleUser {
-		return fmt.Errorf("invalid role: %s", role)
-	}
-	_, err := s.DB.NewUpdate().Model((*model.User)(nil)).
-		Set("role = ?, updated_at = now()", role).
-		Where("id = ?", userID).Exec(ctx)
-	return err
-}
-
-// CreatePlaceholderUser creates a user with minimal info for team invites.
-// The user will get proper name when they first log in.
-func (s *Store) CreatePlaceholderUser(ctx context.Context, email, role string) error {
+// CreatePlaceholderUser creates a plain user with minimal info for team
+// invites; the invite then grants the role through SetRoleAtomic. The
+// user will get proper name when they first log in.
+func (s *Store) CreatePlaceholderUser(ctx context.Context, email string) error {
 	u := &model.User{
 		ID:    newID(),
 		Email: email,
 		Name:  "",
-		Role:  role,
+		Role:  model.RoleUser,
 	}
 	_, err := s.DB.NewInsert().Model(u).
 		On("CONFLICT (email) DO NOTHING"). // Don't overwrite existing user
@@ -348,84 +423,139 @@ func (s *Store) CountOwners(ctx context.Context) (int, error) {
 		Where("role = 'owner'").Count(ctx)
 }
 
-// ErrLastOwner is returned by DemoteOwnerAtomic when the demotion
-// would leave zero owners. Locked-by-design: callers must NOT bypass
-// this check with a raw SetUserRole call from the handler layer.
+// SetupNeeded reports whether this database still waits for its first
+// owner. Setup creates that owner without authentication, so anything
+// showing the install is in use closes it: setup_complete, or an owner, an
+// admin or a product in the database. Counting owners alone left setup
+// open on installs whose admins never became owner (#42). Pass the setup
+// transaction as db to check under its lock.
+func (s *Store) SetupNeeded(ctx context.Context, db bun.IDB) (bool, error) {
+	complete, err := getSettingIn(ctx, db, "setup_complete")
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if complete == "true" {
+		return false, nil
+	}
+	var installed bool
+	err = db.NewRaw(`SELECT EXISTS (SELECT 1 FROM users WHERE role IN ('owner', 'admin'))
+		OR EXISTS (SELECT 1 FROM products)`).Scan(ctx, &installed)
+	return !installed, err
+}
+
+// EnsureOwner promotes an admin to owner when admins exist but no owner
+// does, and returns the promoted email ("" when nothing changed). It picks
+// the admin listed first in ADMIN_EMAILS, else the earliest admin.
+// Installs from before setup existed, and admins who first signed in
+// through ADMIN_EMAILS after startup, were left with no owner, so no one
+// could manage roles.
+func (s *Store) EnsureOwner(ctx context.Context, adminEmails []string) (string, error) {
+	var email string
+	err := s.DB.NewRaw(`UPDATE users SET role = 'owner', updated_at = now()
+		WHERE id = (SELECT id FROM users WHERE role = 'admin'
+			ORDER BY array_position(?::text[], email) NULLS LAST, created_at, id LIMIT 1)
+		AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner')
+		RETURNING email`, pgdialect.Array(adminEmails)).Scan(ctx, &email)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return email, err
+}
+
+// PromoteAdminEmail raises a plain user listed in ADMIN_EMAILS to admin,
+// or to owner when the install has no owner yet, and returns the role
+// the user ends up with.
+func (s *Store) PromoteAdminEmail(ctx context.Context, userID string) (string, error) {
+	var role string
+	err := s.DB.NewRaw(`UPDATE users SET updated_at = now(), role = CASE
+			WHEN EXISTS (SELECT 1 FROM users WHERE role = 'owner') THEN 'admin' ELSE 'owner' END
+		WHERE id = ? AND role = 'user'
+		RETURNING role`, userID).Scan(ctx, &role)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = s.DB.NewRaw("SELECT role FROM users WHERE id = ?", userID).Scan(ctx, &role)
+	}
+	return role, err
+}
+
+// ErrLastOwner is returned when a role change would leave zero owners.
+// Every change that can take the owner role away goes through
+// SetRoleAtomic; raw UPDATEs that only grant a role (setup,
+// ADMIN_EMAILS promotion, EnsureOwner) cannot break the invariant.
 var ErrLastOwner = errors.New("cannot remove the last owner")
 
-// DemoteOwnerAtomic locks every owner row in a tx, recounts, and
-// demotes the target only if at least one owner would remain.
-//
-// Why a tx with FOR UPDATE? The original handler did
-//  1. CountOwners()  (no lock)
-//  2. SetUserRole(target, "user")  (separate stmt)
-//
-// Two concurrent demotions of two DIFFERENT owners — when the org
-// has exactly 2 owners — could both pass step 1 (each sees count=2,
-// "OK to remove one"), then both step 2 → zero owners. We've seen
-// this in production-like load testing.
-//
-// FOR UPDATE on the owner rows serialises the two demotions: the
-// second one waits, re-counts after the first has committed (sees
-// count=1), and rejects with ErrLastOwner.
-//
-// targetID may or may not currently be an owner — if it's not, the
-// UPDATE is a no-op (0 rows affected) and we return nil, matching
-// the previous handler-side semantics (caller already verified the
-// target was admin/owner before reaching us).
-func (s *Store) DemoteOwnerAtomic(ctx context.Context, targetID string) error {
-	// Acquire a session-scoped advisory lock OUTSIDE the tx so the
-	// lock is held by the connection itself. Without this, when
-	// bun's pool hands two concurrent calls different connections,
-	// FOR UPDATE on per-row owner locks only serialises demotions
-	// of the SAME target — two demotions of A and B then both
-	// pass count==2 and zero owners remain.
-	//
-	// pg_advisory_lock(N) blocks until acquired. We release it in
-	// a defer; if the process crashes the session ends and Postgres
-	// reaps the lock automatically.
-	conn, err := s.DB.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err := conn.NewRaw("SELECT pg_advisory_lock(8675310)").Exec(ctx); err != nil {
-		return err
-	}
-	defer func() {
-		_, _ = conn.NewRaw("SELECT pg_advisory_unlock(8675310)").Exec(context.Background())
-	}()
+// ErrNotOwner is returned by SetRoleAtomic when the acting user is no
+// longer an owner by the time the team lock is held.
+var ErrNotOwner = errors.New("only an owner can manage team members")
 
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
+// ErrUserNotFound is returned by SetRoleAtomic when the target user does
+// not exist.
+var ErrUserNotFound = errors.New("user not found")
 
-	var ownerCount int
-	if err := tx.NewRaw("SELECT COUNT(*) FROM users WHERE role = 'owner'").Scan(ctx, &ownerCount); err != nil {
-		return err
-	}
+// TeamLockKey serializes every team role change.
+const TeamLockKey = 8675310
 
-	// Determine the target's current role. If they're an owner AND
-	// they're the last one, refuse. If they're admin (not owner) we
-	// can demote freely — the last-owner invariant is unaffected.
+// SetRoleAtomic changes a team member's role under one transaction lock
+// shared by every team change, and reports the role the target held
+// before, read under that lock, and whether the role changed. It
+// recounts owners inside the lock: a change that takes the owner role
+// from the last owner fails with ErrLastOwner. When actorID is set, the
+// actor must still be an owner under the lock, or it fails with
+// ErrNotOwner; the handler's own check ran before the lock, and a
+// concurrent change may have demoted the actor since. An empty actorID
+// skips that check, for changes the system makes on its own.
+//
+// Why the lock? Counting owners and then updating in separate
+// statements let two concurrent demotions of two different owners both
+// see count=2 and leave zero owners; inviting an owner as admin skipped
+// the check entirely. Row locks alone only serialize changes to the
+// same target, so one advisory lock covers them all. Comparing the
+// current role inside it also keeps concurrent identical changes from
+// each reporting a change.
+func (s *Store) SetRoleAtomic(ctx context.Context, actorID, targetID, role string) (string, bool, error) {
+	if role != model.RoleOwner && role != model.RoleAdmin && role != model.RoleUser {
+		return "", false, fmt.Errorf("invalid role: %s", role)
+	}
 	var targetRole string
-	if err := tx.NewRaw("SELECT role FROM users WHERE id = ?", targetID).Scan(ctx, &targetRole); err != nil {
-		return err
-	}
-	if targetRole == model.RoleOwner && ownerCount <= 1 {
-		return ErrLastOwner
-	}
+	changed := false
+	err := s.WithXactLock(ctx, TeamLockKey, func(ctx context.Context, tx bun.Tx) error {
+		if actorID != "" {
+			var actorRole string
+			err := tx.NewRaw("SELECT role FROM users WHERE id = ?", actorID).Scan(ctx, &actorRole)
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && actorRole != model.RoleOwner) {
+				return ErrNotOwner
+			}
+			if err != nil {
+				return err
+			}
+		}
 
-	if _, err := tx.NewRaw(
-		"UPDATE users SET role = ?, updated_at = now() WHERE id = ?",
-		model.RoleUser, targetID,
-	).Exec(ctx); err != nil {
-		return err
-	}
+		err := tx.NewRaw("SELECT role FROM users WHERE id = ?", targetID).Scan(ctx, &targetRole)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if targetRole == role {
+			return nil
+		}
+		if targetRole == model.RoleOwner {
+			var ownerCount int
+			if err := tx.NewRaw("SELECT COUNT(*) FROM users WHERE role = 'owner'").Scan(ctx, &ownerCount); err != nil {
+				return err
+			}
+			if ownerCount <= 1 {
+				return ErrLastOwner
+			}
+		}
 
-	return tx.Commit()
+		if _, err := tx.NewRaw("UPDATE users SET role = ?, updated_at = now() WHERE id = ?", role, targetID).Exec(ctx); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	return targetRole, changed, err
 }
 
 // ─── API Key ───
@@ -535,6 +665,15 @@ func (s *Store) CreateLicense(ctx context.Context, l *model.License) error {
 // CreateLicenseWithSubscription creates a license and, for subscription/trial plans,
 // a subscription record in a single transaction to prevent orphan records.
 func (s *Store) CreateLicenseWithSubscription(ctx context.Context, l *model.License, plan *model.Plan) error {
+	return s.createLicenseWithSubscription(ctx, l, plan, nil)
+}
+
+// createLicenseWithSubscription is CreateLicenseWithSubscription with
+// an optional guard, run on the transaction once the plan and product
+// rows are locked and before anything is written; an error from it
+// rolls the whole write back.
+func (s *Store) createLicenseWithSubscription(ctx context.Context, l *model.License, plan *model.Plan,
+	guard func(ctx context.Context, tx bun.Tx) error) error {
 	if err := s.prepareLicenseForInsert(l); err != nil {
 		return err
 	}
@@ -550,6 +689,11 @@ func (s *Store) CreateLicenseWithSubscription(ctx context.Context, l *model.Lice
 	// edit. Locking them also pins the plan for the checks below.
 	if err := LockReferencedRowsIn(ctx, tx, l.PlanID, l.ProductID); err != nil {
 		return err
+	}
+	if guard != nil {
+		if err := guard(ctx, tx); err != nil {
+			return err
+		}
 	}
 
 	// The plan the caller read may have been retyped since — a
@@ -1812,27 +1956,53 @@ func (s *Store) FindLatestValidOTPCode(ctx context.Context, email string) (*mode
 		Where("email = ?", email).
 		Where("used = false").
 		Where("expires_at > now()").
-		Where("attempts < 5").
+		Where("attempts < ?", MaxOTPAttempts).
 		OrderExpr("created_at DESC").
 		Limit(1).
 		Scan(ctx)
 	return otp, err
 }
 
-func (s *Store) IncrementOTPAttempts(ctx context.Context, id string) error {
-	_, err := s.DB.NewUpdate().Model((*model.OTPCode)(nil)).
-		Set("attempts = attempts + 1").
-		Where("id = ?", id).
-		Exec(ctx)
-	return err
+// MaxOTPAttempts is how many guesses one login code allows.
+const MaxOTPAttempts = 5
+
+// ClaimOTPAttempt takes one of the code's attempts and returns how many
+// it has used now. ok is false when none was left, or the code was used
+// or expired meanwhile: the guess must then not be compared at all.
+//
+// The attempt is taken before the compare, in one statement. Read
+// first and counted after, a burst of parallel guesses all saw a count
+// under the limit and were all compared.
+func (s *Store) ClaimOTPAttempt(ctx context.Context, id string) (attempts int, ok bool, err error) {
+	err = s.DB.NewRaw(`UPDATE otp_codes SET attempts = attempts + 1
+		WHERE id = ? AND attempts < ? AND used = false AND expires_at > now()
+		RETURNING attempts`, id, MaxOTPAttempts).Scan(ctx, &attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return attempts, true, nil
 }
 
-func (s *Store) MarkOTPUsed(ctx context.Context, id string) error {
-	_, err := s.DB.NewUpdate().Model((*model.OTPCode)(nil)).
+// ConsumeOTPCode marks an unused code used and reports whether this
+// call was the one that did it. Two requests presenting the same code
+// at once both pass the hash check; only one of them gets true here.
+func (s *Store) ConsumeOTPCode(ctx context.Context, id string) (bool, error) {
+	res, err := s.DB.NewUpdate().Model((*model.OTPCode)(nil)).
 		Set("used = true").
 		Where("id = ?", id).
+		Where("used = false").
 		Exec(ctx)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 func (s *Store) CleanExpiredOTPs(ctx context.Context) {

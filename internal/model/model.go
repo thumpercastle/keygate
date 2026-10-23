@@ -263,7 +263,15 @@ type Plan struct {
 	// TokenTTLDays is how long a signed token may be used offline
 	// before the client must verify again. 0 = server default.
 	TokenTTLDays int `bun:",notnull" json:"token_ttl_days"`
-	MaxSeats     int `bun:",notnull" json:"max_seats"`
+	// SelfSignup lets a visitor claim a licence on this plan from its
+	// /pay link by confirming an email address. Only for plans with no
+	// Stripe price and no update period. SignupDailyCap limits claims
+	// per UTC day (0 = no cap); SignupConsentText, when set, is the
+	// label of an optional marketing-consent checkbox on the form.
+	SelfSignup        bool   `bun:",notnull" json:"self_signup"`
+	SignupDailyCap    int    `bun:",notnull" json:"signup_daily_cap"`
+	SignupConsentText string `bun:",notnull" json:"signup_consent_text"`
+	MaxSeats          int    `bun:",notnull" json:"max_seats"`
 	// Seat-bound desktop sign-in policy (see SeatDevicePolicy). The
 	// columns default to 1 / 2 / 180 / false for existing plans; the
 	// admin handler supplies the same defaults when a new plan omits
@@ -410,6 +418,16 @@ type License struct {
 	// so every seat can go to an invitee. False (the zero value) keeps
 	// the per-seat rule that the owner is seat #1.
 	OwnerSeatReleased bool `bun:",notnull" json:"owner_seat_released"`
+	// SignupSource is SignupSourceSelf for a licence the customer
+	// claimed themselves on a self sign-up plan, empty otherwise.
+	// MarketingConsent is what they answered to the plan's consent
+	// checkbox at that moment, stamped with MarketingConsentAt.
+	SignupSource       string     `bun:",notnull,default:''" json:"signup_source,omitempty"`
+	MarketingConsent   bool       `bun:",notnull" json:"marketing_consent"`
+	MarketingConsentAt *time.Time `json:"marketing_consent_at,omitempty"`
+	// SignupPlanID is the plan a self sign-up licence was claimed on.
+	// PlanID moves with the licence; this stays, for the daily cap.
+	SignupPlanID string `bun:",nullzero" json:"signup_plan_id,omitempty"`
 
 	CreatedAt time.Time `bun:",nullzero,default:now()" json:"created_at"`
 	UpdatedAt time.Time `bun:",nullzero,default:now()" json:"updated_at"`
@@ -530,6 +548,10 @@ const (
 	StatusSuspended = "suspended"
 	StatusRevoked   = "revoked"
 )
+
+// SignupSourceSelf marks a licence claimed through self sign-up
+// (License.SignupSource).
+const SignupSourceSelf = "self_signup"
 
 // Who suspended a licence (License.SuspendedBy).
 const (
@@ -868,6 +890,44 @@ type LicenseRenewal struct {
 	CreatedAt time.Time `bun:",nullzero,default:now()" json:"created_at"`
 }
 
+// License upgrade states (LicenseUpgrade.State).
+const (
+	UpgradePending  = "pending"
+	UpgradeApplied  = "applied"
+	UpgradeReverted = "reverted"
+	UpgradeExpired  = "expired"
+	UpgradeRefunded = "refunded"
+	UpgradeVoid     = "void"
+)
+
+// LicenseUpgrade is one checkout that upgrades a licence Stripe does
+// not bill (a free plan's) to a paid plan. Applied, the From* fields
+// hold the licence as the upgrade found it, so a full refund or the end
+// of the subscription can put it back instead of revoking it.
+type LicenseUpgrade struct {
+	bun.BaseModel `bun:"table:license_upgrades"`
+
+	ID                      string     `bun:",pk" json:"id"`
+	LicenseID               string     `bun:",notnull" json:"license_id"`
+	ToPlanID                string     `bun:",nullzero" json:"to_plan_id,omitempty"`
+	State                   string     `bun:",notnull" json:"state"`
+	StripeCheckoutSessionID string     `bun:",notnull" json:"stripe_checkout_session_id"`
+	StripePaymentIntentID   string     `bun:",notnull,default:''" json:"stripe_payment_intent_id,omitempty"`
+	StripeSubscriptionID    string     `bun:",notnull,default:''" json:"stripe_subscription_id,omitempty"`
+	FromPlanID              string     `bun:",nullzero" json:"from_plan_id,omitempty"`
+	FromStatus              string     `bun:",notnull,default:''" json:"from_status,omitempty"`
+	FromValidUntil          *time.Time `json:"from_valid_until,omitempty"`
+	FromUpdatesUntil        *time.Time `json:"from_updates_until,omitempty"`
+	FromUpdatesTermsSet     bool       `bun:",notnull" json:"from_updates_terms_set"`
+	FromPaymentProvider     string     `bun:",notnull,default:''" json:"from_payment_provider,omitempty"`
+	FromStripeCustomerID    string     `bun:",notnull,default:''" json:"from_stripe_customer_id,omitempty"`
+	FromCanceledAt          *time.Time `json:"from_canceled_at,omitempty"`
+	EndReason               string     `bun:",notnull,default:''" json:"end_reason,omitempty"`
+	CreatedAt               time.Time  `bun:",nullzero,default:now()" json:"created_at"`
+	AppliedAt               *time.Time `json:"applied_at,omitempty"`
+	EndedAt                 *time.Time `json:"ended_at,omitempty"`
+}
+
 // Counts reports whether the renewal still contributes to the
 // license's maintenance period.
 func (r *LicenseRenewal) Counts() bool { return r.RefundedAt == nil && r.UpdatesUntil != nil }
@@ -951,6 +1011,14 @@ func UpdatesUntilFor(licenseType string, days int, now time.Time) *time.Time {
 	return &until
 }
 
+// IsFree reports whether Keygate charges nothing for the plan: no
+// purchase price, no update period and no renewals. It is the rule the
+// plans_self_signup_free constraint holds a self sign-up plan to, and
+// the one an upgrade checks the licence's current plan against.
+func (p *Plan) IsFree() bool {
+	return p.StripePriceID == "" && p.UpdatesDays == 0 && p.RenewalDays == 0 && p.StripeRenewalPriceID == ""
+}
+
 // InitialUpdatesUntil is the maintenance period a new license on this
 // plan starts with, as the plan reads right now.
 func (p *Plan) InitialUpdatesUntil(now time.Time) *time.Time {
@@ -1008,21 +1076,46 @@ type MeteredBilling struct {
 
 // Webhook event constants
 const (
-	EventLicenseCreated         = "license.created"
-	EventLicenseCanceled        = "license.canceled"
-	EventLicenseSuspended       = "license.suspended"
-	EventLicenseReinstated      = "license.reinstated"
-	EventLicenseRevoked         = "license.revoked"
-	EventQuotaWarning           = "quota.warning"
-	EventQuotaExceeded          = "quota.exceeded"
-	EventSeatAdded              = "seat.added"
-	EventSeatRemoved            = "seat.removed"
-	EventPlanChanged            = "plan.changed"
-	EventLicenseQuantityChanged = "license.quantity_changed"
-	EventReleasePublished       = "release.published"
-	EventReleaseYanked          = "release.yanked"
-	EventReleaseUnyanked        = "release.unyanked"
+	EventLicenseCreated          = "license.created"
+	EventLicenseActivated        = "license.activated"
+	EventLicenseDeactivated      = "license.deactivated"
+	EventLicenseExpiryChanged    = "license.expiry_changed"
+	EventLicenseUpdatesChanged   = "license.updates_changed"
+	EventLicenseExpired          = "license.expired"
+	EventLicenseCanceled         = "license.canceled"
+	EventLicenseSuspended        = "license.suspended"
+	EventLicenseReinstated       = "license.reinstated"
+	EventLicenseRevoked          = "license.revoked"
+	EventLicensePaymentFailed    = "license.payment_failed"
+	EventLicensePaymentRecovered = "license.payment_recovered"
+	EventQuotaWarning            = "quota.warning"
+	EventQuotaExceeded           = "quota.exceeded"
+	EventSeatAdded               = "seat.added"
+	EventSeatRemoved             = "seat.removed"
+	EventPlanChanged             = "plan.changed"
+	EventLicenseQuantityChanged  = "license.quantity_changed"
+	EventReleasePublished        = "release.published"
+	EventReleaseYanked           = "release.yanked"
+	EventReleaseUnyanked         = "release.unyanked"
 )
+
+// WebhookEvents is every event a webhook can subscribe to. Delivery
+// matches the name exactly, so a subscription to anything else would
+// never fire; it is refused instead. webhook.test is sent to an
+// endpoint on request whatever it subscribes to, so it is not here.
+var WebhookEvents = []string{
+	EventLicenseCreated, EventLicenseActivated, EventLicenseDeactivated,
+	EventLicenseExpiryChanged, EventLicenseUpdatesChanged, EventLicenseExpired,
+	EventLicenseCanceled, EventLicenseSuspended, EventLicenseReinstated,
+	EventLicenseRevoked, EventLicensePaymentFailed, EventLicensePaymentRecovered,
+	EventQuotaWarning, EventQuotaExceeded, EventSeatAdded, EventSeatRemoved,
+	EventPlanChanged, EventReleasePublished, EventReleaseYanked, EventReleaseUnyanked,
+}
+
+// IsValidWebhookEvent reports whether e is in WebhookEvents.
+func IsValidWebhookEvent(e string) bool {
+	return slices.Contains(WebhookEvents, e)
+}
 
 // ─── Release (logical release event) ───
 //

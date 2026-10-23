@@ -15,9 +15,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -58,6 +60,9 @@ var credentialPathPrefixes = []string{"/api/v1/portal/licenses/"}
 type portalLicense struct {
 	*model.License
 	LicenseKey string `json:"license_key"`
+	// Upgradable says the owner can upgrade it to a paid plan now
+	// (see StripeHandler.UpgradableLicenses).
+	Upgradable bool `json:"upgradable"`
 }
 
 // portalLicenseFor shapes a licence for the portal user with address
@@ -99,6 +104,9 @@ func portalPlanView(p *model.Plan) gin.H {
 		"license_type": p.LicenseType, "billing_interval": p.BillingInterval,
 		"per_seat": p.PerSeat, "min_quantity": p.MinQuantity, "max_quantity": p.MaxQuantity,
 		"stripe_price_id": p.StripePriceID, "checkout_id": p.CheckoutID,
+		// The portal's upgrade offers no plan selling an update
+		// period; it needs this to leave them out.
+		"updates_days": p.UpdatesDays,
 	}
 }
 
@@ -118,6 +126,7 @@ func (out portalLicense) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	fields["license_key"] = key
+	fields["upgradable"] = json.RawMessage(strconv.FormatBool(out.Upgradable))
 	return json.Marshal(fields)
 }
 
@@ -469,7 +478,7 @@ func main() {
 	})
 
 	licenseH := handler.NewLicenseHandler(licenseSvc)
-	authH := &handler.AuthHandler{Store: db, Config: cfg, Email: emailSvc}
+	authH := &handler.AuthHandler{Store: db, Config: cfg, Email: emailSvc, Webhook: webhookSvc}
 	stripeH := &payment.StripeHandler{
 		Store:         db,
 		WebhookSecret: cfg.StripeWebhookSecret,
@@ -481,6 +490,10 @@ func main() {
 	// Initialize thread-safe webhook secret with config value
 	stripeH.SetWebhookSecret(cfg.StripeWebhookSecret)
 	expiryChecker := service.NewExpiryChecker(db, emailSvc, webhookSvc, logger)
+	if cfg.StripeSecretKey != "" {
+		expiryChecker.EndPastDueUpgrade = stripeH.EndPastDueUpgrade
+		expiryChecker.EndGraceExpiredUpgrade = stripeH.EndGraceExpiredUpgrade
+	}
 	meteredSyncer := service.NewMeteredBillingSyncer(db, logger)
 	adminH := handler.NewAdminHandler(db, webhookSvc, emailSvc, expiryChecker, meteredSyncer)
 	// An update period may only be written once the links a public
@@ -498,6 +511,7 @@ func main() {
 	// cannot be put at all.
 	if cfg.StripeSecretKey != "" {
 		adminH.SubscriptionEnded = stripeH.SubscriptionEnded
+		adminH.CancelSubscription = stripeH.CancelForAdmin
 	}
 	// Recorded across replicas and across restarts: links signed
 	// before this start keep the lifetime they were signed with, so
@@ -540,6 +554,11 @@ func main() {
 		if err := db.SyncAdminEmails(context.Background(), cfg.AdminEmails); err != nil {
 			logger.Error("sync admin emails failed", "error", err)
 		}
+	}
+	if email, err := db.EnsureOwner(context.Background(), cfg.AdminEmails); err != nil {
+		logger.Error("ensure owner failed", "error", err)
+	} else if email != "" {
+		logger.Info("no owner found, promoted an admin to owner", "email", email)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -707,8 +726,11 @@ func main() {
 
 		// DB check
 		if err := db.DB.PingContext(c.Request.Context()); err != nil {
+			// The cause goes to the log, not to a public endpoint: a
+			// driver error can carry host names and user names.
 			status = "degraded"
-			checks["database"] = "error: " + err.Error()
+			checks["database"] = "error"
+			logger.Error("health check: database unreachable", "error", err)
 		} else {
 			checks["database"] = "ok"
 		}
@@ -747,7 +769,7 @@ func main() {
 
 	v1.GET("/version", systemH.GetVersion)
 
-	setupH := handler.NewSetupHandler(db)
+	setupH := handler.NewSetupHandler(db, cfg.AdminEmails)
 	v1.GET("/setup/status", setupH.Status)
 	v1.POST("/setup/initialize", setupH.Initialize)
 
@@ -872,12 +894,12 @@ func main() {
 
 	// Release feed endpoints.
 	//
-	// Auth model: all channels (stable / beta / alpha / dev) are public.
-	// Trust comes from the artifact's ed25519 signature, verified by
-	// Sparkle/Velopack/Tauri on the client — not from URL secrecy.
-	// License enforcement happens at app start (POST /license/verify),
-	// not at update-feed time. To keep a pre-release channel private,
-	// don't publish to it; once published, treat the feed URL as public.
+	// Auth model: every channel (stable / beta / alpha / dev) is public,
+	// unless the product sets feed_license_required: its feeds then need
+	// a license key or token, and only serve releases inside the
+	// license's update period. Trust comes from the artifact's ed25519
+	// signature, verified by Sparkle/Velopack/Tauri on the client, not
+	// from URL secrecy.
 	//
 	// Feed clients poll on a timer — sometimes once a minute. We give
 	// the per-IP bucket 4× the regular API limit so a single host
@@ -948,6 +970,20 @@ func main() {
 	// Unified checkout: GET /pay/:checkout_id → Stripe
 	r.GET("/pay/:checkout_id", stripeH.CheckoutByPlan)
 
+	// Self sign-up for free plans (/pay sends those plans to the form).
+	// The code-sending step shares the login's buckets, so it cannot be
+	// used to mail more codes than the login form could.
+	v1.GET("/signup/:checkout_id",
+		middleware.RateLimitByIPScoped("public_plans", cfg.RateLimitAPI, time.Minute),
+		authH.SignupInfo)
+	signup := v1.Group("/signup", middleware.RateLimitByIPScoped("auth", cfg.RateLimitAuth, time.Minute))
+	{
+		signup.POST("/:checkout_id/send",
+			middleware.RateLimitByIPScoped("otp_send", cfg.RateLimitOTPSend, time.Hour),
+			authH.SignupSend)
+		signup.POST("/:checkout_id/verify", authH.SignupVerify)
+	}
+
 	portal := v1.Group("/portal", middleware.SessionAuth(cfg.JWTSecret, db.FindUserIsAdmin))
 	{
 		portal.GET("/me", authH.Me)
@@ -967,9 +1003,16 @@ func main() {
 			// payloads by accident. The owner and seat admins need it —
 			// it is displayed and addresses the activation and seat
 			// endpoints — so it is re-attached for them only.
+			upgradable, err := stripeH.UpgradableLicenses(c, emailStr, licenses)
+			if err != nil {
+				response.Internal(c, err)
+				return
+			}
 			out := make([]portalLicense, 0, len(licenses))
 			for _, l := range licenses {
-				out = append(out, portalLicenseFor(l, emailStr, db.DecryptLicenseKey(l)))
+				pl := portalLicenseFor(l, emailStr, db.DecryptLicenseKey(l))
+				pl.Upgradable = upgradable[l.ID]
+				out = append(out, pl)
 			}
 			// The portal hides the renewal button while the switch is
 			// off; the endpoint refuses the sale regardless.
@@ -1001,7 +1044,7 @@ func main() {
 			name := strings.TrimSpace(req.Name)
 			// Strip HTML tags to prevent XSS
 			name = stripHTMLTags(name)
-			if len(name) > 100 {
+			if utf8.RuneCountInString(name) > 100 {
 				response.BadRequest(c, "name too long (max 100 characters)")
 				return
 			}
@@ -1098,8 +1141,8 @@ func main() {
 			}
 			if !strings.EqualFold(lic.Email, emailStr) {
 				// Check if user has a seat on this license. Return
-				// the same 404 the handler returns when the license
-				// doesn't exist — otherwise the differential between
+				// the same 404, code included, the handler returns
+				// when the license doesn't exist — otherwise the differential between
 				// 403 (exists but yours) and 404 (doesn't exist) is
 				// a license-existence oracle. License keys are 32-
 				// byte random so the keyspace defeats enumeration in
@@ -1107,7 +1150,7 @@ func main() {
 				// Only an ACCEPTED seat counts: a pending invitation
 				// confers nothing until it is claimed.
 				if seat, err := db.FindSeatByEmail(c, lic.ID, emailStr); err != nil || seat.AcceptedAt == nil {
-					response.NotFound(c, "license not found")
+					response.Err(c, http.StatusNotFound, "LICENSE_NOT_FOUND", "license not found")
 					c.Abort()
 					return
 				}
@@ -1164,7 +1207,7 @@ func main() {
 			// as a "this license exists but isn't yours" oracle.
 			seat, err := db.FindSeatByEmail(c, lic.ID, emailStr)
 			if err != nil || seat.AcceptedAt == nil || seat.Role != "admin" {
-				response.NotFound(c, "license not found")
+				response.Err(c, http.StatusNotFound, "LICENSE_NOT_FOUND", "license not found")
 				c.Abort()
 				return
 			}
@@ -1251,6 +1294,7 @@ func main() {
 		// Maintenance renewal for perpetual licenses: a one-time
 		// checkout that extends updates_until.
 		portal.POST("/updates/renew", stripeH.RenewUpdates)
+		portal.POST("/licenses/upgrade", stripeH.StartUpgrade)
 	}
 
 	// Admin route layout: three groups under /admin, all sharing the
