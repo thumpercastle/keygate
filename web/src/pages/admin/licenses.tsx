@@ -505,6 +505,16 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
     onError: (e: Error) => showToast(e.message, "error"),
   })
 
+  const [deleteConfirm, setDeleteConfirm] = useState("")
+  const deleteMut = useMutation({
+    mutationFn: () => admin.deleteLicense(id, deleteConfirm),
+    onSuccess: () => {
+      showToast(t("toast.licenseDeleted"), "success")
+      qc.invalidateQueries({ queryKey: ["admin"] })
+      onClose()
+    },
+    onError: (e: Error) => showToast(e.message, "error"),
+  })
   const revokeMut = useMutation({
     mutationFn: () => admin.revokeLicense(id),
     onSuccess: () => {
@@ -1018,6 +1028,55 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                       </AlertDialogContent>
                     </AlertDialog>
                   )}
+                  {/* Hard delete, for test and mistaken records. Typing the
+                    email back is the confirmation; the server re-checks it
+                    and refuses a licence Stripe is still billing. */}
+                  {(() => {
+                    const stripeLive =
+                      !!lic.stripe_subscription_id && ["active", "trialing", "past_due"].includes(lic.status)
+                    const matches = deleteConfirm.trim().toLowerCase() === lic.email.trim().toLowerCase()
+                    return (
+                      <AlertDialog onOpenChange={(open) => !open && setDeleteConfirm("")}>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            disabled={stripeLive || deleteMut.isPending}
+                            title={stripeLive ? t("licenses.deleteBlockedStripe") : undefined}
+                          >
+                            <Trash2 className="h-4 w-4 mr-1" /> {t("licenses.delete")}
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>{t("licenses.delete")}</AlertDialogTitle>
+                            <AlertDialogDescription>{t("licenses.deleteConfirm")}</AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <div className="space-y-2 mt-2">
+                            <Label htmlFor="delete-license-confirm">
+                              {t("licenses.deleteTypeEmail", { email: lic.email })}
+                            </Label>
+                            <Input
+                              id="delete-license-confirm"
+                              autoComplete="off"
+                              value={deleteConfirm}
+                              onChange={(e) => setDeleteConfirm(e.target.value)}
+                            />
+                          </div>
+                          <div className="flex justify-end gap-2 mt-4">
+                            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+                            <AlertDialogAction
+                              className="bg-destructive text-white hover:bg-destructive/90"
+                              disabled={!matches || deleteMut.isPending}
+                              onClick={() => deleteMut.mutate()}
+                            >
+                              {t("licenses.delete")}
+                            </AlertDialogAction>
+                          </div>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    )
+                  })()}
                   {/* A Stripe subscription owns the plan of the licence it
                     bills (the server refuses); a revoked one has none to
                     change. */}

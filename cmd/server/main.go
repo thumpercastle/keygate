@@ -1337,6 +1337,9 @@ func main() {
 
 		licWrite.DELETE("/activations/:id", adminH.DeleteActivation)
 
+		// Permanent delete needs full admin scope; licenses:write keys can't erase.
+		admin.DELETE("/licenses/:id", adminH.DeleteLicense)
+
 		admin.GET("/api-keys", adminH.ListAPIKeys)
 		admin.POST("/api-keys", adminH.CreateAPIKey)
 		admin.POST("/api-keys/:id/rotate", adminH.RotateAPIKey)

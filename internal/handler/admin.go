@@ -2564,6 +2564,62 @@ func (h *AdminHandler) RevokeLicense(c *gin.Context) {
 	response.OK(c, gin.H{"status": "revoked"})
 }
 
+// DeleteLicense permanently removes a licence and everything that
+// cascades from it (activations, seats, usage, subscription rows).
+// Revoke is the normal way to end a licence; this is for clearing out
+// test and mistaken records. The caller must type the licence's email
+// back as `confirm`, and a licence still billed through Stripe is
+// refused so a paying customer can't be erased while being charged.
+func (h *AdminHandler) DeleteLicense(c *gin.Context) {
+	var req struct {
+		Confirm string `json:"confirm"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	lic, err := h.Store.FindLicenseByID(c, c.Param("id"))
+	if err != nil {
+		response.NotFound(c, "license not found")
+		return
+	}
+	if !requireKeyProductScope(c, lic.ProductID) {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.Confirm), strings.TrimSpace(lic.Email)) {
+		response.Err(c, http.StatusBadRequest, "CONFIRMATION_MISMATCH",
+			"type the licence email to confirm permanent deletion")
+		return
+	}
+	if lic.StripeSubscriptionID != "" {
+		switch lic.Status {
+		case model.StatusActive, model.StatusTrialing, model.StatusPastDue:
+			response.Conflict(c, "STRIPE_ACTIVE",
+				"this licence has a live Stripe subscription; cancel or refund it before deleting", nil)
+			return
+		}
+	}
+	if err := h.Store.HardDeleteLicense(c, lic.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			response.NotFound(c, "license not found")
+			return
+		}
+		response.Internal(c, err)
+		return
+	}
+	h.Store.Audit(c, &model.AuditLog{
+		Entity: "license", EntityID: lic.ID, Action: "deleted",
+		ActorType: "admin", ActorID: adminID(c),
+		Changes: map[string]any{
+			"email": lic.Email, "plan_id": lic.PlanID, "product_id": lic.ProductID,
+			"status": lic.Status, "quantity": lic.Quantity,
+		},
+	})
+	if h.Webhook != nil {
+		h.Webhook.Dispatch(c, lic.ProductID, "license.deleted", map[string]any{
+			"license_id": lic.ID, "email": lic.Email,
+		})
+	}
+	response.NoContent(c)
+}
+
 func (h *AdminHandler) RefundLicense(c *gin.Context) {
 	id := c.Param("id")
 	lic, err := h.Store.FindLicenseByID(c, id)

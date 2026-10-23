@@ -420,6 +420,21 @@ func (s *Store) FindLicenseByIDWithCounts(ctx context.Context, id string) (*mode
 	return l, nil
 }
 
+// HardDeleteLicense removes the licence row; every dependent table
+// (activations, seats, usage, subscriptions, renewals, device events)
+// is declared ON DELETE CASCADE. Returns sql.ErrNoRows if it was
+// already gone.
+func (s *Store) HardDeleteLicense(ctx context.Context, id string) error {
+	res, err := s.DB.NewDelete().Model((*model.License)(nil)).Where("id = ?", id).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) RevokeLicense(ctx context.Context, id string) error {
 	_, _ = s.DB.NewDelete().Model((*model.Activation)(nil)).Where("license_id = ?", id).Exec(ctx)
 	res, err := s.DB.NewUpdate().Model((*model.License)(nil)).

@@ -112,8 +112,8 @@ function put<T>(path: string, body?: unknown) {
 function patch<T>(path: string, body?: unknown) {
   return request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined })
 }
-function del<T>(path: string) {
-  return request<T>(path, { method: "DELETE" })
+function del<T>(path: string, body?: unknown) {
+  return request<T>(path, { method: "DELETE", body: body ? JSON.stringify(body) : undefined })
 }
 
 // ─── Site Config (public, no auth) ───
@@ -339,6 +339,8 @@ export const admin = {
   setLicenseUpdatesUntil: (id: string, updatesUntil: string) =>
     post<License>(`/admin/licenses/${id}/updates-until`, { updates_until: updatesUntil }),
   revokeLicense: (id: string) => post(`/admin/licenses/${id}/revoke`),
+  // Permanent: the server checks `confirm` against the licence email.
+  deleteLicense: (id: string, confirm: string) => del(`/admin/licenses/${id}`, { confirm }),
   suspendLicense: (id: string) => post(`/admin/licenses/${id}/suspend`),
   reinstateLicense: (id: string) => post(`/admin/licenses/${id}/reinstate`),
   refundLicense: (id: string) => post(`/admin/licenses/${id}/refund`),

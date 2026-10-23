@@ -196,6 +196,11 @@ const en = {
   "licenses.resendEmailConfirm": "Send the license key to {email} again? Use this when the first email never arrived.",
   "licenses.resendEmailAction": "Send",
   "licenses.revoke": "Revoke",
+  "licenses.delete": "Delete permanently",
+  "licenses.deleteConfirm":
+    "This erases the license and its activations, seats, usage and history from the database. It cannot be undone. Use Revoke to end a real customer's license.",
+  "licenses.deleteTypeEmail": "Type {email} to confirm",
+  "licenses.deleteBlockedStripe": "Cancel or refund the Stripe subscription before deleting this license.",
   "licenses.revokeConfirm":
     "This will permanently revoke the license. The customer will lose access immediately. This cannot be undone.",
   "licenses.suspend": "Suspend",
@@ -774,6 +779,7 @@ const en = {
   "toast.planCreated": "Plan created successfully.",
   "toast.planDeleted": "Plan deleted.",
   "toast.licenseCreated": "License issued successfully.",
+  "toast.licenseDeleted": "License permanently deleted.",
   "toast.licenseEmailQueued": "License email on its way to {email}.",
   "toast.apiKeyCreated": "API key created successfully.",
   "toast.addonCreated": "Addon created successfully.",
