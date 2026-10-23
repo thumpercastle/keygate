@@ -628,6 +628,14 @@ const en = {
   "portal.activationsOverLimit":
     "This license is over its activation limit. Existing devices remain active, but new activations are unavailable.",
   "portal.changeSeats": "Change seats",
+  "portal.changeSeatsDesc":
+    "Choose how many people can use this licence, between {min} and {max}. The change is prorated on your next invoice.",
+  "portal.seatCount": "Seats",
+  "portal.seatsInUse": "{used} in use · {current} paid for now",
+  "portal.seatsBelowInUse":
+    "That is fewer than the {used} seats in use. Nobody is removed, but you won't be able to add anyone until you remove people.",
+  "portal.confirmSeats": "Pay for {count} seats",
+  "portal.seatsChanged": "Seats changed to {count}.",
   "portal.inviteDesc": "Invite a new member to this license.",
   "portal.account": "Account",
   "portal.accountDesc": "Your profile and license overview.",

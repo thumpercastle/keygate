@@ -93,6 +93,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   const [copied, setCopied] = useState(false)
   const [showInvoices, setShowInvoices] = useState(false)
   const [showChangePlan, setShowChangePlan] = useState(false)
+  const [showChangeSeats, setShowChangeSeats] = useState(false)
   const [showUpgrade, setShowUpgrade] = useState(false)
   const [showCancel, setShowCancel] = useState(false)
   const productType = lic.product?.type || "perpetual"
@@ -264,11 +265,13 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
                 {t("portal.updatePayment")}
               </Button>
             )}
-            {hasSubscription && perSeat && (
-              <Button variant="link" size="sm" className="px-1" onClick={handleBillingPortal}>
-                {t("portal.changeSeats")}
-              </Button>
-            )}
+            {hasSubscription &&
+              perSeat &&
+              (lic.status === "active" || lic.status === "trialing" || lic.status === "past_due") && (
+                <Button variant="outline" size="sm" onClick={() => setShowChangeSeats(true)}>
+                  {t("portal.changeSeats")}
+                </Button>
+              )}
             {hasSubscription && (lic.status === "active" || lic.status === "trialing") && (
               <>
                 <Button variant="outline" size="sm" onClick={() => setShowChangePlan(true)}>
@@ -326,6 +329,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
         {showInvoices && <InvoicesDialog licenseId={lic.id} onClose={() => setShowInvoices(false)} />}
 
         {showChangePlan && <ChangePlanDialog license={lic} onClose={() => setShowChangePlan(false)} />}
+        {showChangeSeats && <ChangeSeatsDialog license={lic} onClose={() => setShowChangeSeats(false)} />}
         {showUpgrade && <UpgradeDialog license={lic} onClose={() => setShowUpgrade(false)} />}
       </CardContent>
     </Card>
@@ -1123,6 +1127,69 @@ function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClos
             </div>
           </AlertDialogContent>
         </AlertDialog>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ChangeSeatsDialog sets how many seats a per-seat subscription pays
+// for. Stripe prorates the difference onto the next invoice. Going
+// below the seats in use removes nobody; it only stops new invitations
+// until someone is removed, which the dialog says before it happens.
+function ChangeSeatsDialog({ license, onClose }: { license: PortalLicense; onClose: () => void }) {
+  const { t } = useI18n()
+  const qc = useQueryClient()
+  const min = license.plan?.min_quantity ?? 1
+  const max = license.plan?.max_quantity ?? min
+  const current = license.quantity ?? min
+  const [quantity, setQuantity] = useState(current)
+  const ownerSeat = license.owner_seat_released ? 0 : 1
+  const inUse = (license.seats?.filter((seat) => !seat.removed_at).length ?? 0) + ownerSeat
+  const valid = Number.isInteger(quantity) && quantity >= min && quantity <= max
+  const changeMut = useMutation({
+    mutationFn: () => portal.changeQuantity({ license_id: license.id, quantity }),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
+      showToast(t("portal.seatsChanged", { count: r.quantity }), "success")
+      onClose()
+    },
+    onError: (e: Error) => showToast(e.message, "error"),
+  })
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t("portal.changeSeats")}</DialogTitle>
+          <DialogDescription>{t("portal.changeSeatsDesc", { min, max })}</DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <div className="space-y-2">
+            <Label htmlFor="seat-quantity">{t("portal.seatCount")}</Label>
+            <Input
+              id="seat-quantity"
+              type="number"
+              min={min}
+              max={max}
+              value={Number.isNaN(quantity) ? "" : quantity}
+              onChange={(e) => setQuantity(e.target.valueAsNumber)}
+            />
+            <p className="text-xs text-muted-foreground">{t("portal.seatsInUse", { used: inUse, current })}</p>
+            {valid && quantity < inUse && (
+              <p className="text-xs text-destructive">{t("portal.seatsBelowInUse", { used: inUse })}</p>
+            )}
+          </div>
+          <div className="flex justify-end gap-2 mt-6">
+            <Button variant="outline" onClick={onClose} disabled={changeMut.isPending}>
+              {t("common.cancel")}
+            </Button>
+            <Button onClick={() => changeMut.mutate()} disabled={!valid || quantity === current || changeMut.isPending}>
+              {changeMut.isPending
+                ? t("common.loading")
+                : t("portal.confirmSeats", { count: Number.isNaN(quantity) ? current : quantity })}
+            </Button>
+          </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   )

@@ -1288,6 +1288,7 @@ func main() {
 		// match the trust model rather than reading like a system
 		// endpoint sitting at the top level.
 		portal.POST("/subscription/change-plan", stripeH.ChangePlan)
+		portal.POST("/subscription/quantity", stripeH.ChangeQuantity)
 		portal.POST("/subscription/cancel", stripeH.CancelSubscription)
 		portal.POST("/subscription/billing-portal", stripeH.CreatePortalSession)
 		portal.GET("/subscription/invoices", stripeH.ListInvoices)

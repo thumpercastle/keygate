@@ -261,6 +261,9 @@ export const portal = {
       "/portal/subscription/change-plan",
       data,
     ),
+  // Owner only: the number of seats a per-seat subscription pays for.
+  changeQuantity: (data: { license_id: string; quantity: number }) =>
+    post<{ status: string; quantity: number }>("/portal/subscription/quantity", data),
   cancelSubscription: (data: { license_id: string; immediate?: boolean }) =>
     post<{ status: string; immediate: boolean }>("/portal/subscription/cancel", data),
   getBillingPortal: (data: { license_id: string }) =>

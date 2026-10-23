@@ -2835,6 +2835,121 @@ func (h *StripeHandler) ChangePlan(c *gin.Context) {
 	})
 }
 
+// ChangeQuantity changes the number of seats a Stripe-billed per-seat
+// licence pays for. Only the owner pays, so only the owner may. The
+// change is prorated like a plan change, and the licence takes the new
+// quantity at once rather than waiting for the webhook. Lowering it
+// below the seats in use removes nobody: the licence is over its limit
+// until the owner removes someone, and no one new can be added.
+//
+// POST /portal/subscription/quantity  { license_id, quantity }
+func (h *StripeHandler) ChangeQuantity(c *gin.Context) {
+	var req struct {
+		LicenseID string `json:"license_id" binding:"required"`
+		Quantity  int    `json:"quantity" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "license_id and quantity are required")
+		return
+	}
+	lic, err := h.Store.FindLicenseByID(c, req.LicenseID)
+	if err != nil {
+		response.NotFound(c, "license not found")
+		return
+	}
+	emailVal, _ := c.Get("email")
+	if e, ok := emailVal.(string); !ok || !strings.EqualFold(lic.Email, e) {
+		response.Forbidden(c, "not your license")
+		return
+	}
+	switch lic.Status {
+	case model.StatusActive, model.StatusTrialing, model.StatusPastDue:
+	default:
+		response.Err(c, http.StatusConflict, "LICENSE_QUANTITY_CHANGE_UNAVAILABLE",
+			"seats cannot be changed while the license is "+lic.Status)
+		return
+	}
+	if lic.Plan == nil || !lic.Plan.PerSeat {
+		response.Err(c, http.StatusBadRequest, "NOT_PER_SEAT", "this plan is not sold per seat")
+		return
+	}
+	if lic.StripeSubscriptionID == "" {
+		response.Err(c, http.StatusBadRequest, "NO_SUBSCRIPTION", "license has no Stripe subscription")
+		return
+	}
+	if req.Quantity < lic.Plan.MinQuantity || req.Quantity > lic.Plan.MaxQuantity {
+		response.Err(c, http.StatusBadRequest, "QUANTITY_OUT_OF_RANGE",
+			fmt.Sprintf("quantity must be between %d and %d", lic.Plan.MinQuantity, lic.Plan.MaxQuantity))
+		return
+	}
+
+	stripeReadAt, err := h.Store.StripeReadStamp(c)
+	if err != nil {
+		response.Internal(c, err)
+		return
+	}
+	sub, err := subscription.Get(lic.StripeSubscriptionID, nil)
+	if err != nil {
+		response.Internal(c, err)
+		return
+	}
+	item := stripeSubscriptionItemForPlan(sub, lic.Plan)
+	if item == nil {
+		response.Internal(c, fmt.Errorf("stripe subscription %s has no item for plan %s", lic.StripeSubscriptionID, lic.Plan.ID))
+		return
+	}
+	if item.Quantity == int64(req.Quantity) && lic.Quantity == req.Quantity {
+		response.OK(c, gin.H{"status": "unchanged", "quantity": lic.Quantity})
+		return
+	}
+	params := &stripe.SubscriptionParams{
+		ProrationBehavior: stripe.String("create_prorations"),
+		Items: []*stripe.SubscriptionItemsParams{
+			{ID: stripe.String(item.ID), Quantity: stripe.Int64(int64(req.Quantity))},
+		},
+	}
+	if _, err := subscription.Update(lic.StripeSubscriptionID, params); err != nil {
+		response.Internal(c, err)
+		return
+	}
+
+	lic.Quantity = req.Quantity
+	oldQuantity, written, err := h.Store.UpdateLicensePlanAndQuantity(c, lic, stripeReadAt, true)
+	if err != nil {
+		response.Internal(c, err)
+		return
+	}
+	if written && oldQuantity != lic.Quantity {
+		h.Store.Audit(c, &model.AuditLog{
+			Entity: "license", EntityID: lic.ID, Action: "quantity_changed", ActorType: "user",
+			Changes: map[string]any{"old": oldQuantity, "new": lic.Quantity, "proration": "create_prorations"},
+		})
+		if h.WebhookSvc != nil {
+			h.WebhookSvc.Dispatch(c, lic.ProductID, model.EventLicenseQuantityChanged, map[string]any{
+				"license_id": lic.ID, "old_quantity": oldQuantity, "new_quantity": lic.Quantity,
+			})
+		}
+	}
+	response.OK(c, gin.H{"status": "quantity_changed", "quantity": lic.Quantity})
+}
+
+// stripeSubscriptionItemForPlan picks the subscription item that bills
+// plan: the one on its price, or the only item there is.
+func stripeSubscriptionItemForPlan(sub *stripe.Subscription, plan *model.Plan) *stripe.SubscriptionItem {
+	if sub == nil || sub.Items == nil {
+		return nil
+	}
+	for _, it := range sub.Items.Data {
+		if it != nil && it.Price != nil && it.Price.ID == plan.StripePriceID {
+			return it
+		}
+	}
+	if len(sub.Items.Data) == 1 {
+		return sub.Items.Data[0]
+	}
+	return nil
+}
+
 // licenseForCharge finds the license a charge paid for.
 //
 //   - One-time purchases: the charge's payment intent is the one the
