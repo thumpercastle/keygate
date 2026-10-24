@@ -34,7 +34,8 @@ func callChangeQuantity(h *StripeHandler, email string, body map[string]any) (in
 
 // The owner changes the seat count of a Stripe-billed per-seat licence
 // from the portal: Stripe's subscription item takes the new quantity,
-// prorated, and the licence follows it straight away.
+// and the licence follows it straight away. Added seats are invoiced
+// and charged now, prorated, and only if the payment succeeds.
 func TestChangeQuantity_UpdatesStripeAndTheLicence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
@@ -66,8 +67,8 @@ func TestChangeQuantity_UpdatesStripeAndTheLicence(t *testing.T) {
 		t.Fatalf("change quantity = %d %s", code, ec)
 	}
 	if update.Get("items[0][id]") != "si_seats" || update.Get("items[0][quantity]") != "5" ||
-		update.Get("proration_behavior") != "create_prorations" {
-		t.Fatalf("Stripe update = %v, want the seat item set to 5, prorated", update)
+		update.Get("proration_behavior") != "always_invoice" || update.Get("payment_behavior") != "error_if_incomplete" {
+		t.Fatalf("Stripe update = %v, want the seat item set to 5, invoiced now, refused if unpaid", update)
 	}
 	got, err := s.FindLicenseByID(ctx, lic.ID)
 	if err != nil || got.Quantity != 5 {
@@ -84,6 +85,73 @@ func TestChangeQuantity_UpdatesStripeAndTheLicence(t *testing.T) {
 	}
 	if !audited {
 		t.Fatal("no quantity_changed audit entry")
+	}
+}
+
+// Fewer seats are not refunded on the spot: the unused time is credited
+// to the next invoice, and nothing is charged.
+func TestChangeQuantity_RemovingSeatsCreditsTheNextInvoice(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	s, plan := perSeatPaymentFixture(t, "price_ps_qty_down")
+	lic := makePerSeatSyncLicense(t, s, plan, model.StatusActive, 5, "qtydown")
+	if err := store.SyncLicenseSubscriptionIn(ctx, s.DB, lic.ID, plan, model.StatusActive, nil); err != nil {
+		t.Fatal(err)
+	}
+	var update url.Values
+	stubStripe(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		sub := fmt.Sprintf(`{"id":%q,"object":"subscription","status":"active","items":{"data":[{"id":"si_seats","quantity":%%d,"price":{"id":%q}}]}}`,
+			lic.StripeSubscriptionID, plan.StripePriceID)
+		switch {
+		case r.Method == http.MethodGet:
+			fmt.Fprintf(w, sub, 5)
+		case r.Method == http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			update, _ = url.ParseQuery(string(body))
+			fmt.Fprintf(w, sub, 3)
+		}
+	})
+	h := &StripeHandler{Store: s}
+	if code, ec := callChangeQuantity(h, lic.Email, map[string]any{"license_id": lic.ID, "quantity": 3}); code != http.StatusOK {
+		t.Fatalf("change quantity = %d %s", code, ec)
+	}
+	if update.Get("items[0][quantity]") != "3" || update.Get("proration_behavior") != "create_prorations" ||
+		update.Get("payment_behavior") != "" {
+		t.Fatalf("Stripe update = %v, want 3 seats credited to the next invoice", update)
+	}
+	if got, _ := s.FindLicenseByID(ctx, lic.ID); got.Quantity != 3 {
+		t.Fatalf("licence quantity = %d, want 3", got.Quantity)
+	}
+}
+
+// A declined card leaves everything as it was: Stripe refuses the
+// update, the licence keeps its seats, and the owner is told why.
+func TestChangeQuantity_DeclinedPaymentChangesNothing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	s, plan := perSeatPaymentFixture(t, "price_ps_qty_declined")
+	lic := makePerSeatSyncLicense(t, s, plan, model.StatusActive, 3, "qtydecl")
+	if err := store.SyncLicenseSubscriptionIn(ctx, s.DB, lic.ID, plan, model.StatusActive, nil); err != nil {
+		t.Fatal(err)
+	}
+	stubStripe(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			fmt.Fprintf(w, `{"id":%q,"object":"subscription","status":"active","items":{"data":[{"id":"si_seats","quantity":3,"price":{"id":%q}}]}}`,
+				lic.StripeSubscriptionID, plan.StripePriceID)
+			return
+		}
+		w.WriteHeader(http.StatusPaymentRequired)
+		fmt.Fprint(w, `{"error":{"type":"card_error","code":"card_declined","decline_code":"insufficient_funds","message":"Your card has insufficient funds."}}`)
+	})
+	h := &StripeHandler{Store: s}
+	code, ec := callChangeQuantity(h, lic.Email, map[string]any{"license_id": lic.ID, "quantity": 4})
+	if code != http.StatusPaymentRequired || ec != "PAYMENT_FAILED" {
+		t.Fatalf("declined seat purchase = %d %s, want 402 PAYMENT_FAILED", code, ec)
+	}
+	if got, _ := s.FindLicenseByID(ctx, lic.ID); got.Quantity != 3 {
+		t.Fatalf("licence quantity = %d after a declined payment, want 3", got.Quantity)
 	}
 }
 

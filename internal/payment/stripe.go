@@ -2836,11 +2836,14 @@ func (h *StripeHandler) ChangePlan(c *gin.Context) {
 }
 
 // ChangeQuantity changes the number of seats a Stripe-billed per-seat
-// licence pays for. Only the owner pays, so only the owner may. The
-// change is prorated like a plan change, and the licence takes the new
-// quantity at once rather than waiting for the webhook. Lowering it
-// below the seats in use removes nobody: the licence is over its limit
-// until the owner removes someone, and no one new can be added.
+// licence pays for. Only the owner pays, so only the owner may. Added
+// seats are invoiced and charged at once, prorated, and only if that
+// payment succeeds: a declined card leaves the subscription and the
+// licence as they were. Removed seats credit the unused time to the
+// next invoice. The licence takes the new quantity at once rather than
+// waiting for the webhook. Lowering it below the seats in use removes
+// nobody: the licence is over its limit until the owner removes
+// someone, and no one new can be added.
 //
 // POST /portal/subscription/quantity  { license_id, quantity }
 func (h *StripeHandler) ChangeQuantity(c *gin.Context) {
@@ -2902,13 +2905,24 @@ func (h *StripeHandler) ChangeQuantity(c *gin.Context) {
 		response.OK(c, gin.H{"status": "unchanged", "quantity": lic.Quantity})
 		return
 	}
+	proration := "create_prorations"
 	params := &stripe.SubscriptionParams{
-		ProrationBehavior: stripe.String("create_prorations"),
 		Items: []*stripe.SubscriptionItemsParams{
 			{ID: stripe.String(item.ID), Quantity: stripe.Int64(int64(req.Quantity))},
 		},
 	}
+	if int64(req.Quantity) > item.Quantity {
+		proration = "always_invoice"
+		params.PaymentBehavior = stripe.String("error_if_incomplete")
+	}
+	params.ProrationBehavior = stripe.String(proration)
 	if _, err := subscription.Update(lic.StripeSubscriptionID, params); err != nil {
+		var se *stripe.Error
+		if errors.As(err, &se) && se.Type == stripe.ErrorTypeCard {
+			response.Err(c, http.StatusPaymentRequired, "PAYMENT_FAILED",
+				"The payment for the extra seats did not go through ("+se.Msg+"). Your seats have not changed.")
+			return
+		}
 		response.Internal(c, err)
 		return
 	}
@@ -2922,7 +2936,7 @@ func (h *StripeHandler) ChangeQuantity(c *gin.Context) {
 	if written && oldQuantity != lic.Quantity {
 		h.Store.Audit(c, &model.AuditLog{
 			Entity: "license", EntityID: lic.ID, Action: "quantity_changed", ActorType: "user",
-			Changes: map[string]any{"old": oldQuantity, "new": lic.Quantity, "proration": "create_prorations"},
+			Changes: map[string]any{"old": oldQuantity, "new": lic.Quantity, "proration": proration},
 		})
 		if h.WebhookSvc != nil {
 			h.WebhookSvc.Dispatch(c, lic.ProductID, model.EventLicenseQuantityChanged, map[string]any{

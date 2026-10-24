@@ -1151,9 +1151,10 @@ function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClos
 }
 
 // ChangeSeatsDialog sets how many seats a per-seat subscription pays
-// for. Stripe prorates the difference onto the next invoice. Going
-// below the seats in use removes nobody; it only stops new invitations
-// until someone is removed, which the dialog says before it happens.
+// for. Added seats are charged now for the rest of the period (and not
+// added if the payment fails); removed seats credit the next invoice.
+// Going below the seats in use removes nobody; it only stops new
+// invitations until someone is removed, which the dialog says first.
 function ChangeSeatsDialog({ license, onClose }: { license: PortalLicense; onClose: () => void }) {
   const { t } = useI18n()
   const qc = useQueryClient()
@@ -1204,7 +1205,9 @@ function ChangeSeatsDialog({ license, onClose }: { license: PortalLicense; onClo
             <Button onClick={() => changeMut.mutate()} disabled={!valid || quantity === current || changeMut.isPending}>
               {changeMut.isPending
                 ? t("common.loading")
-                : t("portal.confirmSeats", { count: Number.isNaN(quantity) ? current : quantity })}
+                : t(quantity < current ? "portal.confirmSeatsDecrease" : "portal.confirmSeats", {
+                    count: Number.isNaN(quantity) ? current : quantity,
+                  })}
             </Button>
           </div>
         </DialogBody>
