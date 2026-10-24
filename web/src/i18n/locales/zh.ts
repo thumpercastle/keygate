@@ -619,6 +619,8 @@ const zh = {
   "settings.emailLogoUrlDesc": "显示在每封邮件顶部的 PNG 或 JPEG（多数邮件客户端不显示 SVG）。可使用本站路径。",
   "settings.emailFooterText": "邮件页脚",
   "settings.emailFooterTextDesc": "显示在每封邮件底部的纯文本，例如公司名称、地址和支持联系方式。",
+  "settings.sendTestEmailToMe": "发送测试邮件给我",
+  "settings.testEmailSentTo": "测试邮件已发送至 {email}。",
   "portal.myLicenses": "许可证",
   "portal.myLicensesDesc": "管理您的软件许可证、使用量和团队成员。",
   "portal.noLicenses": "暂无许可证",

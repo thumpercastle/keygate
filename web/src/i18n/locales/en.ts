@@ -642,6 +642,8 @@ const en = {
   "settings.emailFooterText": "Email Footer",
   "settings.emailFooterTextDesc":
     "Plain text under every email, such as your company name, address and support contact.",
+  "settings.sendTestEmailToMe": "Send test to me",
+  "settings.testEmailSentTo": "Test email sent to {email}.",
   "portal.myLicenses": "Licenses",
   "portal.myLicensesDesc": "Manage your software licenses, usage, and team members.",
   "portal.noLicenses": "No licenses yet",

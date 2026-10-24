@@ -160,3 +160,29 @@ func TestEmailPreview(t *testing.T) {
 		t.Error("an unknown email previewed without error")
 	}
 }
+
+// A test send is the real thing: the email as a customer gets it, sent
+// through the configured provider, with "[Test]" in front of the subject
+// so nobody mistakes it. It is laid out once, not twice.
+func TestSendTest(t *testing.T) {
+	s := openNotifyStore(t)
+	testsupport.LockSettings(t, s.DB)
+	e := NewEmailService("", "", "", "", "", slog.Default(), s)
+	var gotTo, gotSubject, gotBody string
+	e.sendHook = func(to, subject, body string) error {
+		gotTo, gotSubject, gotBody = to, subject, body
+		return nil
+	}
+	if err := e.SendTest("otp_code", "", "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if gotTo != "owner@example.com" || gotSubject != "[Test] Your login code" || !strings.Contains(gotBody, "123456") {
+		t.Fatalf("sent %q %q", gotTo, gotSubject)
+	}
+	if n := strings.Count(strings.ToLower(gotBody), "<html"); n != 1 {
+		t.Errorf("test email has %d <html> elements, want 1", n)
+	}
+	if err := e.SendTest("no_such_email", "", "owner@example.com"); err == nil {
+		t.Error("unknown email sent without error")
+	}
+}

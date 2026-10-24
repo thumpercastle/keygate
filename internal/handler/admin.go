@@ -4785,6 +4785,46 @@ func (h *AdminHandler) PreviewEmailTemplate(c *gin.Context) {
 	response.OK(c, gin.H{"subject": subject, "html": page})
 }
 
+// SendTestEmailTemplate sends one email, filled with sample data and
+// marked "[Test]", to the address given or else the signed-in admin:
+// the draft in the request, or the saved or built-in template.
+//
+// POST /admin/email-templates/send-test  { key, template?, to? }
+func (h *AdminHandler) SendTestEmailTemplate(c *gin.Context) {
+	var req struct {
+		Key      string `json:"key" binding:"required"`
+		Template string `json:"template"`
+		To       string `json:"to"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "key is required")
+		return
+	}
+	to := strings.TrimSpace(req.To)
+	if to == "" {
+		if e, ok := c.Get("email"); ok {
+			to, _ = e.(string)
+		}
+	}
+	if to == "" {
+		response.BadRequest(c, "to is required when signed in with an API key")
+		return
+	}
+	if appErr := apperr.ValidateEmail(to); appErr != nil {
+		response.BadRequest(c, appErr.Message)
+		return
+	}
+	if h.Email == nil || !h.Email.IsConfigured() {
+		response.Err(c, http.StatusServiceUnavailable, "EMAIL_NOT_CONFIGURED", "email is not set up, so nothing can be sent")
+		return
+	}
+	if err := h.Email.SendTest(req.Key, req.Template, to); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"status": "sent", "to": to})
+}
+
 // ─── Team (Admin Management) ───
 
 // ListTeamMembers returns all platform admins (owner + admin roles).

@@ -575,6 +575,10 @@ export const admin = {
     get<{ templates: Record<string, { custom: string; default: string }> }>("/admin/email-templates"),
   // Renders an email as it would be sent (subject, layout, sample data);
   // template is an unsaved draft, or omitted for the saved/default one.
+  // Sends that email, marked [Test] and filled with sample data, to `to`
+  // or else the signed-in admin.
+  sendTemplateTest: (key: string, template?: string, to?: string) =>
+    post<{ status: string; to: string }>("/admin/email-templates/send-test", { key, template, to }),
   previewEmailTemplate: (key: string, template?: string) =>
     post<{ subject: string; html: string }>("/admin/email-templates/preview", { key, template }),
 

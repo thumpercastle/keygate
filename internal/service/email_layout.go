@@ -251,3 +251,42 @@ func (s *EmailService) Preview(key, src string) (subject, page string, err error
 	}
 	return subjectOr(subj, previewSubjects[key]), withAttribution(s.layout(body)), nil
 }
+
+// SendTest sends one email to `to` exactly as a customer would get it,
+// filled with the sample data and with "[Test] " before the subject: src
+// when given (a draft, validated first), otherwise the saved or built-in
+// template. Unlike the customer sends it waits for delivery and reports
+// failure, including email not being set up.
+func (s *EmailService) SendTest(key, src, to string) error {
+	def, ok := DefaultTemplates()[key]
+	if !ok {
+		return fmt.Errorf("unknown email %q", key)
+	}
+	if src == "" {
+		src = s.getTemplate(key, def)
+	}
+	if err := ValidateTemplate(src); err != nil {
+		return err
+	}
+	data := map[string]any{}
+	for k, v := range templateSample {
+		data[k] = v
+	}
+	delete(data, "SiteName")
+	delete(data, "PortalURL")
+	delete(data, "BrandColor")
+	subj, body, err := executeParts(src, s.templateData(data))
+	if err != nil {
+		return err
+	}
+	if s.sendHook == nil {
+		ok, err := s.Configured()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("email is not set up")
+		}
+	}
+	return s.Send(to, "[Test] "+subjectOr(subj, previewSubjects[key]), body)
+}

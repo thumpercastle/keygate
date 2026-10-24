@@ -86,6 +86,9 @@ type EmailService struct {
 	// baseURL is the install's public address (BASE_URL), used to link
 	// customers to their portal from templates ({{.PortalURL}}).
 	baseURL string
+	// sendHook, when set (tests only), receives each mail as it would be
+	// delivered — laid out and attributed — instead of a provider.
+	sendHook func(to, subject, htmlBody string) error
 }
 
 // SetBaseURL records the install's public address for portal links.
@@ -234,6 +237,9 @@ func DefaultTemplates() map[string]string {
 }
 
 func (s *EmailService) Send(to, subject, htmlBody string) error {
+	if s.sendHook != nil {
+		return s.sendHook(to, subject, withAttribution(s.layout(htmlBody)))
+	}
 	cfg, err := s.resolve(context.Background())
 	if err != nil {
 		// A config read error is a real failure, not "skip": returning

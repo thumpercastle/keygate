@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Code, Eye, Mail, Pencil, RotateCcw } from "lucide-react"
+import { Code, Eye, Mail, Pencil, RotateCcw, Send } from "lucide-react"
 import { useState } from "react"
 import { showToast } from "@/components/toast"
 import {
@@ -147,6 +147,12 @@ export default function EmailTemplatesManager() {
     onSuccess: (r) => setPreview(r),
     onError: (e: Error) => showToast(e.message, "error"),
   })
+  const sendTestMut = useMutation({
+    mutationFn: (p: { key: string; template?: string }) => admin.sendTemplateTest(p.key, p.template),
+    onSuccess: (r) => showToast(t("settings.testEmailSentTo", { email: r.to }), "success"),
+    onError: (e: Error) => showToast(e.message, "error"),
+  })
+
   const openPreview = (key: string, draft?: string) => {
     setPreview(null)
     setPreviewing(key)
@@ -203,6 +209,17 @@ export default function EmailTemplatesManager() {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
+                        disabled={sendTestMut.isPending}
+                        onClick={() => sendTestMut.mutate({ key })}
+                        title={t("settings.sendTestEmailToMe")}
+                        aria-label={t("settings.sendTestEmailToMe")}
+                      >
+                        <Send className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
                         onClick={() => startEdit(key)}
                         title={t("settings.editTemplate")}
                       >
@@ -252,6 +269,13 @@ export default function EmailTemplatesManager() {
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => editing && openPreview(editing, editValue)}>
                   {t("settings.templatePreview")}
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={sendTestMut.isPending}
+                  onClick={() => editing && sendTestMut.mutate({ key: editing, template: editValue })}
+                >
+                  {t("settings.sendTestEmailToMe")}
                 </Button>
                 <Button variant="outline" onClick={() => setEditing(null)}>
                   {t("common.cancel")}
