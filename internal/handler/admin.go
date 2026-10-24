@@ -4281,6 +4281,7 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 var settingsWritable = map[string]bool{
 	"site_name": true, "timezone": true, "language": true, "brand_color": true, "logo_url": true,
 	"favicon_url": true, "font_stylesheet_url": true, "font_family": true, "theme_tokens": true,
+	"email_logo_url": true, "email_footer_text": true,
 	"signup_mode":                      true,
 	service.ReminderDaysSetting:        true,
 	"maintenance_features_enabled":     true,
@@ -4317,6 +4318,15 @@ func init() {
 		key := service.NotifySettingKey(kind)
 		settingsWritable[key] = true
 		settingsEnum[key] = []string{"true", "false"}
+	}
+}
+
+// Every email template the service knows is writable: the key list is
+// built from service.DefaultTemplates so a new template can never be
+// listed in the dashboard yet refused on save.
+func init() {
+	for key := range service.DefaultTemplates() {
+		settingsWritable["email_template_"+key] = true
 	}
 }
 
@@ -4469,7 +4479,11 @@ func brandingProblem(key, val string) string {
 		return ""
 	}
 	switch key {
-	case "logo_url", "favicon_url", "font_stylesheet_url":
+	case "email_footer_text":
+		if utf8.RuneCountInString(val) > 1000 {
+			return "email_footer_text is limited to 1000 characters"
+		}
+	case "logo_url", "favicon_url", "font_stylesheet_url", "email_logo_url":
 		if strings.HasPrefix(val, "/") && !strings.HasPrefix(val, "//") && len(val) <= 2048 {
 			return ""
 		}
@@ -4743,6 +4757,32 @@ func (h *AdminHandler) GetEmailTemplates(c *gin.Context) {
 	}
 
 	response.OK(c, gin.H{"templates": result})
+}
+
+// PreviewEmailTemplate renders one email as it would be sent — subject,
+// layout and attribution — with sample data, from the draft in the
+// request or, without one, the saved or built-in template.
+//
+// POST /admin/email-templates/preview  { key, template? }  → { subject, html }
+func (h *AdminHandler) PreviewEmailTemplate(c *gin.Context) {
+	var req struct {
+		Key      string `json:"key" binding:"required"`
+		Template string `json:"template"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "key is required")
+		return
+	}
+	if h.Email == nil {
+		response.Err(c, http.StatusServiceUnavailable, "EMAIL_UNAVAILABLE", "email is not set up")
+		return
+	}
+	subject, page, err := h.Email.Preview(req.Key, req.Template)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"subject": subject, "html": page})
 }
 
 // ─── Team (Admin Management) ───

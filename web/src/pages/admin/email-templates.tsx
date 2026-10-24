@@ -18,67 +18,80 @@ import { Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle } from "@/
 import { useI18n } from "@/i18n"
 import { admin } from "@/lib/api"
 
+// Every email the server sends, in the order a customer meets them.
+// SiteName, PortalURL and BrandColor are available in every template
+// (see EmailService.templateData); they are listed last on each. A
+// template can set its own subject with {{define "subject"}}…{{end}}.
 const TEMPLATE_META: Record<string, { label: string; variables: string[] }> = {
-  // SiteName and PortalURL are available in every template (see
-  // EmailService.templateData); they are listed last on each.
+  otp_code: { label: "Sign-in code", variables: ["Code", "SiteName", "PortalURL", "BrandColor"] },
+  welcome: { label: "Welcome", variables: ["Name", "SiteName", "PortalURL", "BrandColor"] },
   license_created: {
-    label: "License Created",
-    variables: ["Product", "Plan", "LicenseKey", "DownloadURL", "SiteName", "PortalURL"],
-  },
-  license_expiring: {
-    label: "License Expiring",
-    variables: ["Product", "LicenseKey", "ExpiresAt", "DaysLeft", "IsTrial", "SiteName", "PortalURL"],
-  },
-  updates_ending: {
-    label: "Updates Ending",
-    variables: ["Product", "LicenseKey", "UpdatesUntil", "SiteName", "PortalURL"],
-  },
-  license_expired: { label: "License Expired", variables: ["Product", "SiteName", "PortalURL"] },
-  trial_expired: { label: "Trial Expired", variables: ["Product", "SiteName", "PortalURL"] },
-  license_suspended: { label: "License Suspended", variables: ["Product", "Reason", "SiteName", "PortalURL"] },
-  quota_warning: {
-    label: "Quota Warning",
-    variables: ["Product", "Feature", "Used", "Limit", "Pct", "SiteName", "PortalURL"],
+    label: "Licence ready",
+    variables: ["Product", "Plan", "LicenseKey", "DownloadURL", "SiteName", "PortalURL", "BrandColor"],
   },
   seat_invite: {
-    label: "Seat Invite",
-    variables: ["Product", "Inviter", "InviteURL", "DownloadURL", "SiteName", "PortalURL"],
+    label: "Seat invitation",
+    variables: ["Product", "Inviter", "InviteURL", "DownloadURL", "SiteName", "PortalURL", "BrandColor"],
   },
-  payment_failed: { label: "Payment Failed", variables: ["Product", "SiteName", "PortalURL"] },
-}
-
-const PREVIEW_DATA: Record<string, string> = {
-  Product: "AwesomeApp",
-  Plan: "Pro",
-  LicenseKey: "KG-XXXX-XXXX-XXXX-XXXX",
-  ExpiresAt: "2026-06-15",
-  UpdatesUntil: "2027-06-15",
-  Feature: "api_calls",
-  Used: "800",
-  Limit: "1000",
-  Pct: "80",
-  Inviter: "admin@company.com",
-  Reason: "Policy violation",
-  DaysLeft: "3",
-  IsTrial: "true",
-  DownloadURL: "https://example.com/download",
-  InviteURL: "https://licenses.example.com/accept-invite?token=…",
-  SiteName: "Acme Licensing",
-  PortalURL: "https://licenses.example.com/portal",
-}
-
-function fillTemplate(html: string): string {
-  let result = html
-  for (const [k, v] of Object.entries(PREVIEW_DATA)) {
-    result = result.replaceAll(`{{.${k}}}`, v)
-  }
-  // Preview the "true" side of each conditional: drop {{else}} branches,
-  // then the {{if}}/{{end}} markers (the defaults never nest them).
-  result = result
-    .replace(/\{\{else\}\}[\s\S]*?\{\{end\}\}/g, "")
-    .replace(/\{\{if [^}]+\}\}/g, "")
-    .replace(/\{\{end\}\}/g, "")
-  return result
+  desktop_signin: {
+    label: "App sign-in link",
+    variables: ["Product", "Device", "Link", "SiteName", "PortalURL", "BrandColor"],
+  },
+  admin_invite: {
+    label: "Admin added",
+    variables: ["Inviter", "Role", "LoginURL", "SiteName", "PortalURL", "BrandColor"],
+  },
+  trial_ending: {
+    label: "Trial ending (subscription)",
+    variables: ["Product", "TrialEnd", "SiteName", "PortalURL", "BrandColor"],
+  },
+  license_expiring: {
+    label: "Licence or trial expiring",
+    variables: ["Product", "LicenseKey", "ExpiresAt", "DaysLeft", "IsTrial", "SiteName", "PortalURL", "BrandColor"],
+  },
+  trial_expired: { label: "Trial ended", variables: ["Product", "SiteName", "PortalURL", "BrandColor"] },
+  renewal_reminder: {
+    label: "Renewal reminder",
+    variables: ["Product", "RenewalDate", "SiteName", "PortalURL", "BrandColor"],
+  },
+  plan_changed: {
+    label: "Plan changed",
+    variables: ["Product", "OldPlan", "NewPlan", "SiteName", "PortalURL", "BrandColor"],
+  },
+  payment_action_required: {
+    label: "Payment needs confirming",
+    variables: ["Product", "InvoiceURL", "SiteName", "PortalURL", "BrandColor"],
+  },
+  payment_failed: { label: "Payment failed", variables: ["Product", "SiteName", "PortalURL", "BrandColor"] },
+  payment_overdue: {
+    label: "Payment still outstanding (day 7)",
+    variables: ["Product", "SiteName", "PortalURL", "BrandColor"],
+  },
+  payment_final_notice: {
+    label: "Final payment notice (day 14)",
+    variables: ["Product", "SiteName", "PortalURL", "BrandColor"],
+  },
+  payment_recovered: {
+    label: "Payment received after failure",
+    variables: ["Product", "SiteName", "PortalURL", "BrandColor"],
+  },
+  subscription_canceled: {
+    label: "Subscription cancelled",
+    variables: ["Product", "Immediate", "SiteName", "PortalURL", "BrandColor"],
+  },
+  license_expired: { label: "Licence expired", variables: ["Product", "SiteName", "PortalURL", "BrandColor"] },
+  license_suspended: {
+    label: "Licence suspended",
+    variables: ["Product", "Reason", "SiteName", "PortalURL", "BrandColor"],
+  },
+  updates_ending: {
+    label: "Updates ending",
+    variables: ["Product", "LicenseKey", "UpdatesUntil", "SiteName", "PortalURL", "BrandColor"],
+  },
+  quota_warning: {
+    label: "Usage quota warning",
+    variables: ["Product", "Feature", "Used", "Limit", "Pct", "SiteName", "PortalURL", "BrandColor"],
+  },
 }
 
 export default function EmailTemplatesManager() {
@@ -125,10 +138,19 @@ export default function EmailTemplatesManager() {
     setEditing(key)
   }
 
-  const getPreviewHtml = (key: string) => {
-    const tmpl = templates[key]
-    if (!tmpl) return ""
-    return fillTemplate(tmpl.custom || tmpl.default)
+  // Previews come from the server, so they show exactly what is sent:
+  // subject, layout and attribution, with sample data. In the editor the
+  // preview is of the draft, before it is saved.
+  const [preview, setPreview] = useState<{ subject: string; html: string } | null>(null)
+  const previewMut = useMutation({
+    mutationFn: (p: { key: string; template?: string }) => admin.previewEmailTemplate(p.key, p.template),
+    onSuccess: (r) => setPreview(r),
+    onError: (e: Error) => showToast(e.message, "error"),
+  })
+  const openPreview = (key: string, draft?: string) => {
+    setPreview(null)
+    setPreviewing(key)
+    previewMut.mutate({ key, template: draft })
   }
 
   return (
@@ -172,7 +194,7 @@ export default function EmailTemplatesManager() {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
-                        onClick={() => setPreviewing(key)}
+                        onClick={() => openPreview(key)}
                         title={t("settings.templatePreview")}
                       >
                         <Eye className="h-4 w-4" />
@@ -226,7 +248,11 @@ export default function EmailTemplatesManager() {
                 value={editValue}
                 onChange={(e) => setEditValue(e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">{t("settings.templateSubjectHint")}</p>
               <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => editing && openPreview(editing, editValue)}>
+                  {t("settings.templatePreview")}
+                </Button>
                 <Button variant="outline" onClick={() => setEditing(null)}>
                   {t("common.cancel")}
                 </Button>
@@ -251,14 +277,22 @@ export default function EmailTemplatesManager() {
             </DialogTitle>
           </DialogHeader>
           <DialogBody>
-            {previewing && (
-              <iframe
-                title="Email Preview"
-                sandbox=""
-                srcDoc={getPreviewHtml(previewing)}
-                className="w-full h-96 border rounded-lg bg-white"
-              />
-            )}
+            {previewing &&
+              (preview ? (
+                <div className="space-y-2">
+                  <p className="text-sm">
+                    <span className="text-muted-foreground">{t("settings.templateSubject")}:</span> {preview.subject}
+                  </p>
+                  <iframe
+                    title="Email Preview"
+                    sandbox=""
+                    srcDoc={preview.html}
+                    className="w-full h-[28rem] border rounded-lg bg-white"
+                  />
+                </div>
+              ) : (
+                <div className="h-96 animate-pulse bg-muted rounded-lg" />
+              ))}
           </DialogBody>
         </DialogContent>
       </Dialog>

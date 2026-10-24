@@ -114,6 +114,8 @@ const FORM_KEYS = [
   "font_stylesheet_url",
   "font_family",
   "theme_tokens",
+  "email_logo_url",
+  "email_footer_text",
   "maintenance_features_enabled",
   "email_provider",
   "smtp_from",
@@ -412,6 +414,26 @@ export default function SettingsPage() {
                     className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
                   />
                   <p className="text-xs text-muted-foreground">{t("settings.themeTokensDesc")}</p>
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label>{t("settings.emailLogoUrl")}</Label>
+                  <Input
+                    value={form.email_logo_url || ""}
+                    onChange={(e) => set("email_logo_url", e.target.value)}
+                    placeholder="/brand/email-logo.png"
+                  />
+                  <p className="text-xs text-muted-foreground">{t("settings.emailLogoUrlDesc")}</p>
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="email-footer">{t("settings.emailFooterText")}</Label>
+                  <textarea
+                    id="email-footer"
+                    value={form.email_footer_text || ""}
+                    onChange={(e) => set("email_footer_text", e.target.value)}
+                    rows={3}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  />
+                  <p className="text-xs text-muted-foreground">{t("settings.emailFooterTextDesc")}</p>
                 </div>
               </div>
             </CardContent>

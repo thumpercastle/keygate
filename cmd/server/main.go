@@ -1411,6 +1411,7 @@ func main() {
 		admin.POST("/system/run-expiry-checks", adminH.RunExpiryChecks)
 		admin.POST("/system/run-metered-sync", adminH.RunMeteredSync)
 		admin.GET("/email-templates", adminH.GetEmailTemplates)
+		admin.POST("/email-templates/preview", adminH.PreviewEmailTemplate)
 
 		admin.GET("/team", adminH.ListTeamMembers)
 		admin.POST("/team", adminH.InviteTeamMember)

@@ -573,6 +573,10 @@ export const admin = {
   // Email Templates
   getEmailTemplates: () =>
     get<{ templates: Record<string, { custom: string; default: string }> }>("/admin/email-templates"),
+  // Renders an email as it would be sent (subject, layout, sample data);
+  // template is an unsaved draft, or omitted for the saved/default one.
+  previewEmailTemplate: (key: string, template?: string) =>
+    post<{ subject: string; html: string }>("/admin/email-templates/preview", { key, template }),
 
   // System
   getVersion: () => get<{ version: string; commit: string; build_date: string }>("/version"),

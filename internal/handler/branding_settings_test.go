@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tabloy/keygate/internal/service"
 	"github.com/tabloy/keygate/internal/store"
 )
 
@@ -45,6 +46,35 @@ func TestThemeSettingsAreWritableAndPublic(t *testing.T) {
 		}
 		if !store.IsPublicSetting(key) {
 			t.Errorf("%q is not served by /config", key)
+		}
+	}
+}
+
+// The email look and every email template can be saved from the
+// dashboard; the logo must be a link an email client can load.
+func TestEmailSettingsAreWritable(t *testing.T) {
+	for _, key := range []string{"email_logo_url", "email_footer_text"} {
+		if !settingsWritable[key] {
+			t.Errorf("%q is not writable", key)
+		}
+	}
+	for key := range service.DefaultTemplates() {
+		if !settingsWritable["email_template_"+key] {
+			t.Errorf("email_template_%s is not writable", key)
+		}
+	}
+	for _, tt := range []struct {
+		key, val string
+		ok       bool
+	}{
+		{"email_logo_url", "/brand/email-logo.png", true},
+		{"email_logo_url", "https://cdn.example.com/logo.png", true},
+		{"email_logo_url", "javascript:alert(1)", false},
+		{"email_footer_text", "Acme Ltd\n1 High Street", true},
+		{"email_footer_text", strings.Repeat("x", 1001), false},
+	} {
+		if got := brandingProblem(tt.key, tt.val); (got == "") != tt.ok {
+			t.Errorf("brandingProblem(%q, %.20q) = %q, want ok=%v", tt.key, tt.val, got, tt.ok)
 		}
 	}
 }

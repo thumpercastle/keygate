@@ -633,6 +633,15 @@ const en = {
   "portal.emailSignInNote": "You sign in with this address. Seat invitations and sign-in links are sent here too.",
   "nav.adminPanel": "Admin",
   "portal.confirmSeatsDecrease": "Change to {count} seats",
+  "settings.templateSubjectHint":
+    'To change the subject line, add {{define "subject"}}Your subject{{end}} anywhere in the template. Without it the email keeps its built-in subject.',
+  "settings.templateSubject": "Subject",
+  "settings.emailLogoUrl": "Email Logo URL",
+  "settings.emailLogoUrlDesc":
+    "PNG or JPEG shown at the top of every email (most email clients do not show SVG). A path on this site works.",
+  "settings.emailFooterText": "Email Footer",
+  "settings.emailFooterTextDesc":
+    "Plain text under every email, such as your company name, address and support contact.",
   "portal.myLicenses": "Licenses",
   "portal.myLicensesDesc": "Manage your software licenses, usage, and team members.",
   "portal.noLicenses": "No licenses yet",

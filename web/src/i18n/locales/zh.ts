@@ -612,6 +612,13 @@ const zh = {
   "portal.emailSignInNote": "您使用此地址登录，席位邀请和登录链接也会发送到这里。",
   "nav.adminPanel": "管理后台",
   "portal.confirmSeatsDecrease": "改为 {count} 个席位",
+  "settings.templateSubjectHint":
+    '要更改邮件主题，可在模板任意位置加入 {{define "subject"}}主题{{end}}。不加则使用内置主题。',
+  "settings.templateSubject": "主题",
+  "settings.emailLogoUrl": "邮件 Logo URL",
+  "settings.emailLogoUrlDesc": "显示在每封邮件顶部的 PNG 或 JPEG（多数邮件客户端不显示 SVG）。可使用本站路径。",
+  "settings.emailFooterText": "邮件页脚",
+  "settings.emailFooterTextDesc": "显示在每封邮件底部的纯文本，例如公司名称、地址和支持联系方式。",
   "portal.myLicenses": "许可证",
   "portal.myLicensesDesc": "管理您的软件许可证、使用量和团队成员。",
   "portal.noLicenses": "暂无许可证",

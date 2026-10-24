@@ -102,6 +102,9 @@ func (s *EmailService) templateData(data map[string]any) map[string]any {
 		}
 		data["SiteName"] = name
 	}
+	if _, ok := data["BrandColor"]; !ok {
+		data["BrandColor"] = s.buttonColour("#111827")
+	}
 	if _, ok := data["PortalURL"]; !ok {
 		portal := ""
 		if s.baseURL != "" {
@@ -215,6 +218,18 @@ func DefaultTemplates() map[string]string {
 		"seat_invite":       tmplSeatInvite,
 		"admin_invite":      tmplAdminInvite,
 		"payment_failed":    tmplPaymentFailed,
+
+		"subscription_canceled":   tmplSubscriptionCanceled,
+		"payment_overdue":         tmplPaymentOverdue,
+		"payment_final_notice":    tmplPaymentFinalNotice,
+		"payment_recovered":       tmplPaymentRecovered,
+		"welcome":                 tmplWelcome,
+		"otp_code":                tmplOTPCode,
+		"plan_changed":            tmplPlanChanged,
+		"renewal_reminder":        tmplRenewalReminder,
+		"payment_action_required": tmplPaymentActionRequired,
+		"trial_ending":            tmplTrialEnding,
+		"desktop_signin":          tmplDesktopSignin,
 	}
 }
 
@@ -243,8 +258,9 @@ func (s *EmailService) Send(to, subject, htmlBody string) error {
 // so a caller that has claimed a queue row never mistakes "could not
 // send" for "sent".
 func (s *EmailService) sendResolved(cfg resolvedConfig, to, subject, htmlBody string) error {
-	// Attribution footer (AGPL v3 Section 7b — see NOTICE).
-	htmlBody = withAttribution(htmlBody)
+	// The house layout, then the attribution footer (AGPL v3 Section
+	// 7b — see NOTICE) inside it.
+	htmlBody = withAttribution(s.layout(htmlBody))
 
 	err := s.deliver(cfg, to, subject, htmlBody)
 	if err != nil {
@@ -659,13 +675,9 @@ func localHostname() string { return "[127.0.0.1]" }
 // RenderLicenseCreated builds the license delivery email. downloadURL is
 // the product's download page ({{.DownloadURL}}); empty leaves it out.
 func (s *EmailService) RenderLicenseCreated(productName, planName, licenseKey, downloadURL string) (subject, body string) {
-	body = s.renderEmail("license_created", tmplLicenseCreated, s.templateData(map[string]any{
-		"Product":     productName,
-		"Plan":        planName,
-		"LicenseKey":  licenseKey,
-		"DownloadURL": downloadURL,
-	}))
-	return "Your license for " + productName, body
+	return s.renderParts("license_created", "Your license for "+productName, map[string]any{
+		"Product": productName, "Plan": planName, "LicenseKey": licenseKey, "DownloadURL": downloadURL,
+	})
 }
 
 func (s *EmailService) SendLicenseCreated(to, productName, planName, licenseKey, downloadURL string) {
@@ -682,18 +694,13 @@ func (s *EmailService) SendLicenseCreated(to, productName, planName, licenseKey,
 // ExpiryChecker.remindExpiring) rather than sending it, for the reasons
 // RenderUpdatesEnding gives.
 func (s *EmailService) RenderLicenseExpiring(productName, licenseKey, expiresAt string, daysLeft int, trial bool) (subject, body string) {
-	body = s.renderEmail("license_expiring", tmplLicenseExpiring, s.templateData(map[string]any{
-		"Product":    productName,
-		"LicenseKey": licenseKey,
-		"ExpiresAt":  expiresAt,
-		"DaysLeft":   daysLeft,
-		"IsTrial":    trial,
-	}))
-	subject = productName + " license expiring soon"
+	fallback := productName + " license expiring soon"
 	if trial {
-		subject = productName + " trial ending soon"
+		fallback = productName + " trial ending soon"
 	}
-	return subject, body
+	return s.renderParts("license_expiring", fallback, map[string]any{
+		"Product": productName, "LicenseKey": licenseKey, "ExpiresAt": expiresAt, "DaysLeft": daysLeft, "IsTrial": trial,
+	})
 }
 
 // RenderUpdatesEnding builds the 14-day notice that a perpetual
@@ -706,26 +713,16 @@ func (s *EmailService) RenderLicenseExpiring(productName, licenseKey, expiresAt 
 // with backoff, so queuing is also what makes the reminder survive a
 // crash.
 func (s *EmailService) RenderUpdatesEnding(productName, licenseKey, updatesUntil string) (subject, body string) {
-	body = s.renderEmail("updates_ending", tmplUpdatesEnding, s.templateData(map[string]any{
-		"Product":      productName,
-		"LicenseKey":   licenseKey,
-		"UpdatesUntil": updatesUntil,
-	}))
-	return productName + " updates ending soon", body
+	return s.renderParts("updates_ending", productName+" updates ending soon", map[string]any{
+		"Product": productName, "LicenseKey": licenseKey, "UpdatesUntil": updatesUntil,
+	})
 }
 
 func (s *EmailService) SendQuotaWarning(to, productName, feature string, used, limit int64, pct int) {
 	if s.skipDisabled("quota_warning", to) {
 		return
 	}
-	body := s.renderEmail("quota_warning", tmplQuotaWarning, s.templateData(map[string]any{
-		"Product": productName,
-		"Feature": feature,
-		"Used":    used,
-		"Limit":   limit,
-		"Pct":     pct,
-	}))
-	subject := fmt.Sprintf("%s: %s quota at %d%%", productName, feature, pct)
+	subject, body := s.renderParts("quota_warning", fmt.Sprintf("%s: %s quota at %d%%", productName, feature, pct), map[string]any{"Product": productName, "Feature": feature, "Used": used, "Limit": limit, "Pct": pct})
 	go func() {
 		if err := s.Send(to, subject, body); err != nil {
 			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
@@ -740,21 +737,18 @@ func (s *EmailService) SendQuotaWarning(to, productName, feature string, used, l
 // admin who forgot to add the placeholder still ships a working
 // link.
 func (s *EmailService) SendSeatInvite(to, productName, inviterName, acceptURL, downloadURL string) {
-	body := s.renderEmail("seat_invite", tmplSeatInvite, s.templateData(map[string]any{
-		"Product":     productName,
-		"Inviter":     inviterName,
-		"InviteURL":   acceptURL,
-		"DownloadURL": downloadURL,
-	}))
+	subject, body := s.renderParts("seat_invite", "You've been invited to "+productName, map[string]any{
+		"Product": productName, "Inviter": inviterName, "InviteURL": acceptURL, "DownloadURL": downloadURL,
+	})
 	// Defensive fallback: if the rendered body doesn't already
 	// contain the claim URL (custom template missed the placeholder),
 	// append it so the recipient still has a way in.
 	if acceptURL != "" && !strings.Contains(body, acceptURL) {
-		body += `<p style="margin-top:24px;font-size:13px;color:#555;">Accept the invitation: <a href="` + acceptURL + `">` + acceptURL + `</a></p>`
+		body += `<p style="margin-top:24px;font-size:13px;color:#555;">Accept the invitation: <a href="` + html.EscapeString(acceptURL) + `">` + html.EscapeString(acceptURL) + `</a></p>`
 	}
 	go func() {
-		if err := s.Send(to, "You've been invited to "+productName, body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "subject", "You've been invited to "+productName, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -763,12 +757,10 @@ func (s *EmailService) SendLicenseExpired(to, productName string) {
 	if s.skipDisabled("license_expired", to) {
 		return
 	}
-	body := s.renderEmail("license_expired", tmplLicenseExpired, s.templateData(map[string]any{
-		"Product": productName,
-	}))
+	subject, body := s.renderParts("license_expired", productName+" license expired", map[string]any{"Product": productName})
 	go func() {
-		if err := s.Send(to, productName+" license expired", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "subject", productName+" license expired", "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -777,12 +769,10 @@ func (s *EmailService) SendTrialExpired(to, productName string) {
 	if s.skipDisabled("trial_expired", to) {
 		return
 	}
-	body := s.renderEmail("trial_expired", tmplTrialExpired, s.templateData(map[string]any{
-		"Product": productName,
-	}))
+	subject, body := s.renderParts("trial_expired", productName+" trial has ended", map[string]any{"Product": productName})
 	go func() {
-		if err := s.Send(to, productName+" trial has ended", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "subject", productName+" trial has ended", "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -791,13 +781,10 @@ func (s *EmailService) SendLicenseSuspended(to, productName, reason string) {
 	if s.skipDisabled("license_suspended", to) {
 		return
 	}
-	body := s.renderEmail("license_suspended", tmplLicenseSuspended, s.templateData(map[string]any{
-		"Product": productName,
-		"Reason":  reason,
-	}))
+	subject, body := s.renderParts("license_suspended", productName+" license suspended", map[string]any{"Product": productName, "Reason": reason})
 	go func() {
-		if err := s.Send(to, productName+" license suspended", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "subject", productName+" license suspended", "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -806,25 +793,10 @@ func (s *EmailService) SendSubscriptionCanceled(to, productName string, immediat
 	if s.skipDisabled("subscription_canceled", to) {
 		return
 	}
-	var tmpl string
-	if immediate {
-		tmpl = `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2>Subscription Canceled</h2>
-<p>Your <strong>` + productName + `</strong> subscription has been canceled immediately.</p>
-<p>Your access has ended. Thank you for being a customer.</p>
-</body></html>`
-	} else {
-		tmpl = `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2>Subscription Will Be Canceled</h2>
-<p>Your <strong>` + productName + `</strong> subscription will be canceled at the end of the current billing period.</p>
-<p>You can continue using the service until then.</p>
-</body></html>`
-	}
+	subject, body := s.renderParts("subscription_canceled", productName+" subscription canceled", map[string]any{"Product": productName, "Immediate": immediate})
 	go func() {
-		if err := s.Send(to, productName+" subscription canceled", tmpl); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -833,12 +805,10 @@ func (s *EmailService) SendPaymentFailed(to, productName string) {
 	if s.skipDisabled("payment_failed", to) {
 		return
 	}
-	body := s.renderEmail("payment_failed", tmplPaymentFailed, s.templateData(map[string]any{
-		"Product": productName,
-	}))
+	subject, body := s.renderParts("payment_failed", productName+" payment failed", map[string]any{"Product": productName})
 	go func() {
-		if err := s.Send(to, productName+" payment failed", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "subject", productName+" payment failed", "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -847,15 +817,10 @@ func (s *EmailService) SendDunningSecond(to, productName string) {
 	if s.skipDisabled("payment_failed", to) {
 		return
 	}
-	body := `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2 style="color: #d97706;">Payment Still Outstanding</h2>
-<p>We've been unable to process your payment for <strong>` + productName + `</strong> for over a week.</p>
-<p>Please update your payment method to avoid losing access.</p>
-</body></html>`
+	subject, body := s.renderParts("payment_overdue", productName+" — payment still outstanding", map[string]any{"Product": productName})
 	go func() {
-		if err := s.Send(to, productName+" — payment still outstanding", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -864,16 +829,10 @@ func (s *EmailService) SendDunningFinal(to, productName string) {
 	if s.skipDisabled("payment_failed", to) {
 		return
 	}
-	body := `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2 style="color: #dc2626;">Final Notice — Access Will Be Suspended</h2>
-<p>Your <strong>` + productName + `</strong> payment has been overdue for 14 days.</p>
-<p>Your access will be suspended soon if payment is not received.</p>
-<p>Please update your payment method immediately.</p>
-</body></html>`
+	subject, body := s.renderParts("payment_final_notice", productName+" — final payment notice", map[string]any{"Product": productName})
 	go func() {
-		if err := s.Send(to, productName+" — final payment notice", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -888,16 +847,12 @@ func (s *EmailService) SendDunningFinal(to, productName string) {
 // grant on the InviteTeamMember handler. The recipient can still
 // learn out-of-band that they're admin.
 func (s *EmailService) SendAdminInvite(to, siteName, inviterName, role, loginURL string) {
-	body := s.renderEmail("admin_invite", tmplAdminInvite, map[string]string{
-		"SiteName": siteName,
-		"Inviter":  inviterName,
-		"Role":     role,
-		"LoginURL": loginURL,
+	subject, body := s.renderParts("admin_invite", "You've been added to "+siteName, map[string]any{
+		"SiteName": siteName, "Inviter": inviterName, "Role": role, "LoginURL": loginURL,
 	})
 	go func() {
-		subj := "You've been added to " + siteName
-		if err := s.Send(to, subj, body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "subject", subj, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -910,15 +865,10 @@ func (s *EmailService) SendPaymentRecovered(to, productName string) {
 	if s.skipDisabled("payment_recovered", to) {
 		return
 	}
-	body := `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2 style="color: #059669;">Payment Recovered — Thanks!</h2>
-<p>Your payment for <strong>` + productName + `</strong> went through. Your subscription is active again, and access is fully restored.</p>
-<p>No further action required.</p>
-</body></html>`
+	subject, body := s.renderParts("payment_recovered", productName+" — payment recovered", map[string]any{"Product": productName})
 	go func() {
-		if err := s.Send(to, productName+" — payment recovered", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -927,30 +877,19 @@ func (s *EmailService) SendWelcome(to, name string) {
 	if s.skipDisabled("welcome", to) {
 		return
 	}
-	body := `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2>Welcome to Keygate!</h2>
-<p>Hi ` + name + `, your account has been created.</p>
-<p>You can manage your licenses and subscriptions from your portal.</p>
-</body></html>`
+	subject, body := s.renderParts("welcome", "Welcome", map[string]any{"Name": name})
 	go func() {
-		if err := s.Send(to, "Welcome to Keygate", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
 
 func (s *EmailService) SendOTPCode(to, code string) {
-	body := `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2>Your login code</h2>
-<p>Enter this code to sign in:</p>
-<div style="background: #f4f4f5; border-radius: 8px; padding: 16px; margin: 16px 0; font-family: monospace; font-size: 32px; text-align: center; letter-spacing: 8px; font-weight: bold;">` + code + `</div>
-<p style="color: #666; font-size: 14px;">This code expires in 10 minutes. If you didn't request this, ignore this email.</p>
-</body></html>`
+	subject, body := s.renderParts("otp_code", "Your login code", map[string]any{"Code": code})
 	go func() {
-		if err := s.Send(to, "Your login code", body); err != nil {
-			s.logger.Error("OTP email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("OTP email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -959,14 +898,10 @@ func (s *EmailService) SendPlanChanged(to, productName, oldPlan, newPlan string)
 	if s.skipDisabled("plan_changed", to) {
 		return
 	}
-	body := `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2>Plan Changed</h2>
-<p>Your <strong>` + productName + `</strong> plan has been changed from <strong>` + oldPlan + `</strong> to <strong>` + newPlan + `</strong>.</p>
-</body></html>`
+	subject, body := s.renderParts("plan_changed", productName+" plan changed", map[string]any{"Product": productName, "OldPlan": oldPlan, "NewPlan": newPlan})
 	go func() {
-		if err := s.Send(to, productName+" plan changed", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -974,29 +909,19 @@ func (s *EmailService) SendPlanChanged(to, productName, oldPlan, newPlan string)
 // RenderRenewalReminder builds the day-before notice that a Stripe
 // subscription renews. The reminder job queues it.
 func (s *EmailService) RenderRenewalReminder(productName, renewalDate string) (subject, body string) {
-	body = `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2>Renewal Reminder</h2>
-<p>Your <strong>` + html.EscapeString(productName) + `</strong> subscription will renew on <strong>` + html.EscapeString(renewalDate) + `</strong>.</p>
-<p>No action is needed if you'd like to continue.</p>
-</body></html>`
-	return productName + " renewal coming up", body
+	return s.renderParts("renewal_reminder", productName+" renewal coming up", map[string]any{
+		"Product": productName, "RenewalDate": renewalDate,
+	})
 }
 
 func (s *EmailService) SendPaymentActionRequired(to, productName, invoiceURL string) {
 	if s.skipDisabled("payment_action_required", to) {
 		return
 	}
-	body := `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2 style="color: #d97706;">Payment Authentication Required</h2>
-<p>Your payment for <strong>` + productName + `</strong> requires additional authentication.</p>
-<p><a href="` + invoiceURL + `" style="display:inline-block;background:` + s.buttonColour("#2563eb") + `;color:white;padding:10px 24px;border-radius:6px;text-decoration:none;">Complete Payment</a></p>
-<p style="color:#666;font-size:14px;">If you don't complete this step, your subscription may be interrupted.</p>
-</body></html>`
+	subject, body := s.renderParts("payment_action_required", productName+" — payment authentication required", map[string]any{"Product": productName, "InvoiceURL": invoiceURL})
 	go func() {
-		if err := s.Send(to, productName+" — payment authentication required", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -1005,16 +930,10 @@ func (s *EmailService) SendTrialEnding(to, productName, trialEnd string) {
 	if s.skipDisabled("trial_ending", to) {
 		return
 	}
-	body := `<!DOCTYPE html>
-<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2>Your Trial is Ending Soon</h2>
-<p>Your <strong>` + productName + `</strong> trial ends on <strong>` + trialEnd + `</strong>.</p>
-<p>After the trial, your subscription will begin automatically. No action needed if you'd like to continue.</p>
-<p style="color:#666;font-size:14px;">If you'd like to cancel, you can do so from your account portal before the trial ends.</p>
-</body></html>`
+	subject, body := s.renderParts("trial_ending", productName+" trial ending soon", map[string]any{"Product": productName, "TrialEnd": trialEnd})
 	go func() {
-		if err := s.Send(to, productName+" trial ending soon", body); err != nil {
-			s.logger.Error("email delivery failed", "to", to, "error", err)
+		if err := s.Send(to, subject, body); err != nil {
+			s.logger.Error("email delivery failed", "to", to, "subject", subject, "error", err)
 		}
 	}()
 }
@@ -1139,6 +1058,9 @@ var templateSample = map[string]any{
 	"Pct": 80, "Inviter": "a@example.com", "InviteURL": "https://example.com/i", "Reason": "reason",
 	"DaysLeft": 3, "IsTrial": true, "DownloadURL": "https://example.com/d", "SiteName": "Site",
 	"PortalURL": "https://example.com/portal", "Role": "admin", "LoginURL": "https://example.com/login",
+	"BrandColor": "#111827", "Immediate": false, "Name": "Sam", "Code": "123456", "OldPlan": "Monthly",
+	"NewPlan": "Annual", "RenewalDate": "2026-01-01", "InvoiceURL": "https://example.com/pay",
+	"TrialEnd": "2026-01-01", "Device": "SAM-LAPTOP", "Link": "https://example.com/signin",
 }
 
 // ValidateTemplate reports whether a custom template both parses and
